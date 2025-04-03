@@ -1,0 +1,16 @@
+# .gitignore for Core CS files (can be expanded later if needed)
+
+# IDE specific files
+.vscode/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Bb]in/
+[Oo]bj/
+
+# Rider specific
+.idea/
