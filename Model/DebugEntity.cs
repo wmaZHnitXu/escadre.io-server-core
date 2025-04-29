@@ -7,4 +7,6 @@ public class DebugEntity : Entity
     {
         Position = spawnPoint;
     }
+
+    public override EntityTypeEnum EntityType => EntityTypeEnum.Debug;
 }

@@ -4,7 +4,11 @@ using Server.Core.Primitives;
 namespace Server.Core.Model
 {
     public abstract class Entity
-    {
+    {   public enum EntityTypeEnum {
+            Debug
+        }
+        public abstract EntityTypeEnum EntityType { get; }
+        public int Id { get; private set; }
         protected readonly Level _level;
         private Vector3 _position;
         public virtual Vector3 Position
@@ -39,6 +43,10 @@ namespace Server.Core.Model
         {
             _level = level;
             _level.AddEntity(this);
+        }
+
+        public void AssignId(int id) {
+            Id = id;
         }
 
         public virtual void Update(float delta)

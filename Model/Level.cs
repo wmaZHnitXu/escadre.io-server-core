@@ -5,8 +5,10 @@ namespace Server.Core.Model
     public class Level
     {
         private List<Entity> _entities;
-        private List<Entity> _toRemove = new List<Entity>();
-        private List<Entity> _toAdd = new List<Entity>();
+        private List<Entity> _toRemove = new ();
+        private List<Entity> _toAdd = new ();
+        private Queue<int> _idsFreed = new ();
+        private int _maxIdAllocated = 0;
 
         public delegate void OnEntityAdded(Entity entity);
         public event OnEntityAdded OnEntityAddedEvent;
@@ -32,12 +34,26 @@ namespace Server.Core.Model
             _toAdd.Add(entity);
         }
 
+        public void RemoveEntity(Entity entity)
+        {
+            _toRemove.Add(entity);
+        }
+
+        public void Destroy()
+        {
+            foreach (Entity entity in _entities)
+            {
+                entity.Kill(true);
+            }
+        }
+
 
         protected void AddAddedEntities()
         {
             foreach (Entity entity in _toAdd)
             {
                 if (entity.IsDead) continue;
+                entity.AssignId(GetNextId());
                 _entities.Add(entity);
                 entity.OnDeathEvent += RemoveEntity;
                 OnEntityAddedEvent(entity);
@@ -51,20 +67,17 @@ namespace Server.Core.Model
             {
                 entity.OnDeathEvent -= RemoveEntity;
                 _entities.Remove(entity);
+                _idsFreed.Enqueue(entity.Id);
             }
             _toRemove.Clear();
         }
 
-        public void RemoveEntity(Entity entity)
-        {
-            _toRemove.Add(entity);
-        }
-
-        public void Destroy()
-        {
-            foreach (Entity entity in _entities)
-            {
-                entity.Kill(true);
+        private int GetNextId() {
+            if (_idsFreed.Count == 0) {
+                return ++_maxIdAllocated;
+            }
+            else {
+                return _idsFreed.Dequeue();
             }
         }
     }
