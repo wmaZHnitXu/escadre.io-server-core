@@ -25,16 +25,12 @@ namespace Server.Core.Model
         /// <summary>
         /// <code>(Entity theDyingOne)</code> 
         /// Obligatory final OnDeath before it will be removed from the level.
-        /// Use only in outer layers.
-        /// For in-model pre-remove preparations override ObligatoryOnRemove() instead.
         /// </summary>
         public event Action<Entity> OnDeathEvent;
 
         /// <summary>
         /// <code>(Entity theDyingAloudOne)</code> 
         /// May not be called if this is the silent removal.
-        /// Use only in outer layers.
-        /// For in-model pre-remove preparations override Death() instead.
         /// Made for kinda destruction sequences.
         /// </summary>
         public event Action<Entity> OnDestructionEvent;
@@ -59,6 +55,7 @@ namespace Server.Core.Model
             {
                 Death();
                 OnDestructionEvent?.Invoke(this);
+                OnDestructionEvent = null;
             }
 
             OnDeathEvent?.Invoke(this);

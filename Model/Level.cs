@@ -37,6 +37,7 @@ namespace Server.Core.Model
         {
             foreach (Entity entity in _toAdd)
             {
+                if (entity.IsDead) continue;
                 _entities.Add(entity);
                 entity.OnDeathEvent += RemoveEntity;
                 OnEntityAddedEvent(entity);
