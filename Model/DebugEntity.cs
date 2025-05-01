@@ -1,12 +1,47 @@
-using Server.Core.Model;
+using System;
 using Server.Core.Primitives;
 
-public class DebugEntity : Entity
+namespace Server.Core.Model
 {
-    public DebugEntity(Level level, Vector3 spawnPoint) : base(level)
+    public class DebugEntity : Entity
     {
-        Position = spawnPoint;
-    }
+        public DebugEntity(Level level) : base(level)
+        {
+            Guilt = 11f;
+            Hydration = 100f;
+        }
 
-    public override EntityTypeEnum EntityType => EntityTypeEnum.Debug;
+        public float Hydration { get; private set; }
+        public float Guilt { get; private set; }
+
+        public Action<Vector3> OnSetRestPositionEvent;
+        public Action<Vector3> OnSpitAtEvent;
+        public Action<Entity> OnShoutAtEvent;
+
+        public void SetRestPosition(Vector3 to)
+        {
+            Position = to;
+            OnSetRestPositionEvent?.Invoke(to);
+            if (Hydration <= 0f) {
+                Hydration += 1337f;
+            }
+        }
+
+        public void SpitAt(Vector3 at)
+        {
+            OnSpitAtEvent?.Invoke(at);
+            if (Guilt < 100f) {
+                Guilt -= 11f;
+            }
+        }
+
+        public void ShoutAt(Entity entity)
+        {
+            Guilt += 10f;
+            Hydration -= 1f;
+            OnShoutAtEvent?.Invoke(entity);
+        }
+
+        public override EntityTypeEnum EntityType => EntityTypeEnum.Debug;
+    }
 }

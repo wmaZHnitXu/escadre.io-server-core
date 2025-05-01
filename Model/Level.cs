@@ -5,9 +5,9 @@ namespace Server.Core.Model
     public class Level
     {
         private List<Entity> _entities;
-        private List<Entity> _toRemove = new ();
-        private List<Entity> _toAdd = new ();
-        private Queue<int> _idsFreed = new ();
+        private List<Entity> _toRemove = new();
+        private List<Entity> _toAdd = new();
+        private Queue<int> _idsFreed = new();
         private int _maxIdAllocated = 0;
 
         public delegate void OnEntityAdded(Entity entity);
@@ -72,11 +72,14 @@ namespace Server.Core.Model
             _toRemove.Clear();
         }
 
-        private int GetNextId() {
-            if (_idsFreed.Count == 0) {
+        private int GetNextId()
+        {
+            if (_idsFreed.Count == 0)
+            {
                 return ++_maxIdAllocated;
             }
-            else {
+            else
+            {
                 return _idsFreed.Dequeue();
             }
         }

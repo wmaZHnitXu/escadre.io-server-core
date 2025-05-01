@@ -4,7 +4,9 @@ using Server.Core.Primitives;
 namespace Server.Core.Model
 {
     public abstract class Entity
-    {   public enum EntityTypeEnum {
+    {
+        public enum EntityTypeEnum
+        {
             Debug
         }
         public abstract EntityTypeEnum EntityType { get; }
@@ -45,7 +47,8 @@ namespace Server.Core.Model
             _level.AddEntity(this);
         }
 
-        public void AssignId(int id) {
+        public void AssignId(int id)
+        {
             Id = id;
         }
 
