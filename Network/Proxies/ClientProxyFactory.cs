@@ -1,6 +1,6 @@
 using System;
 using System.IO;
-using Server.Core.Model; // For EntityTypeEnum
+using Core.Model; // For EntityTypeEnum
 using Core.Network;
 
 namespace Core.Network.Proxies

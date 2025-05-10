@@ -1,8 +1,8 @@
 // File: Scripts/Server/Core/Network/Proxies/DebugEntityProxy.cs
 using System;
 using System.IO;
-using Server.Core.Model;
-using Server.Core.Primitives;
+using Core.Model;
+using Core.Primitives;
 using Core.Network;
 using Core.Logging; // Use Logger
 
@@ -12,65 +12,35 @@ namespace Core.Network.Proxies
     {
         private enum DebugEventType : byte { SetRestPosition = 1, SpitAt = 2, ShoutAt = 3, }
 
-        // --- Server Proxy Implementation ---
         public class ServerProxy : BaseServerProxy<DebugEntity>
         {
-            // No specific state tracking needed for proactive updates anymore
+            public ServerProxy(DebugEntity entity, IServerNetworkLayer networkLayer) : base(entity, networkLayer) { }
 
-            public ServerProxy(DebugEntity entity, IServerNetworkLayer networkLayer)
-                : base(entity, networkLayer) { }
-
-            // --- Checksum Calculation ---
+            // --- Checksum ---
             protected override float CalculateChecksum()
             {
-                // Combine hash codes of relevant state.
-                // Use HashCode.Combine for better distribution than simple addition.
-                // Note: float.GetHashCode can sometimes differ for visually identical values.
-                // A custom checksum function might be more robust if needed.
-                int hash = HashCode.Combine(
-                    _entity.Position.GetHashCode(),
-                    _entity.Rotation.GetHashCode(),
-                    _entity.Hydration.GetHashCode(),
-                    _entity.Guilt.GetHashCode()
-                );
-                // Return the hash code itself as the checksum (or a transformation of it)
-                // It doesn't have to be human-readable, just consistent.
-                return (float)hash; // Cast to float for comparison simplicity
+                int hash = HashCode.Combine(_entity.Position.GetHashCode(), _entity.Rotation.GetHashCode(), _entity.Hydration.GetHashCode(), _entity.Guilt.GetHashCode());
+                return (float)hash;
             }
 
-
-            // --- Overrides for State Serialization (Used for CreateEntity & Corrections) ---
-            protected override void SerializeInitialState(BinaryWriter writer)
+            // --- State Serialization ---
+            public override void SerializeSpecificInitialState(BinaryWriter writer) // Implement interface method
             {
+                // Write initial specific state
                 writer.Write(_entity.Hydration);
                 writer.Write(_entity.Guilt);
             }
 
-            protected override void SerializeState(BinaryWriter writer)
+            protected override void SerializeSpecificCorrectionState(BinaryWriter writer) // Implement base abstract method
             {
-                // Same as initial state for DebugEntity
+                // For DebugEntity, correction state is the same as initial specific state
                 writer.Write(_entity.Hydration);
                 writer.Write(_entity.Guilt);
             }
 
-            // Removed CheckSpecificStateChanged, UpdateLastSpecificState
-
-            // --- Overrides for Event Handling ---
-            protected override void StartReplicatingInternal()
-            {
-                _entity.OnSetRestPositionEvent += HandleSetRestPosition;
-                _entity.OnSpitAtEvent += HandleSpitAt;
-                _entity.OnShoutAtEvent += HandleShoutAt;
-            }
-
-            protected override void StopReplicatingInternal()
-            {
-                _entity.OnSetRestPositionEvent -= HandleSetRestPosition;
-                _entity.OnSpitAtEvent -= HandleSpitAt;
-                _entity.OnShoutAtEvent -= HandleShoutAt;
-            }
-
-            // --- Specific Event Handlers (No changes needed) ---
+            // --- Event Handling ---
+            protected override void StartReplicatingInternal() { _entity.OnSetRestPositionEvent += HandleSetRestPosition; _entity.OnSpitAtEvent += HandleSpitAt; _entity.OnShoutAtEvent += HandleShoutAt; }
+            protected override void StopReplicatingInternal() { _entity.OnSetRestPositionEvent -= HandleSetRestPosition; _entity.OnSpitAtEvent -= HandleSpitAt; _entity.OnShoutAtEvent -= HandleShoutAt; }
             private void HandleSetRestPosition(Vector3 position) { SendEvent((byte)DebugEventType.SetRestPosition, writer => SerializationUtils.WriteVector3(writer, position)); }
             private void HandleSpitAt(Vector3 targetPosition) { SendEvent((byte)DebugEventType.SpitAt, writer => SerializationUtils.WriteVector3(writer, targetPosition)); }
             private void HandleShoutAt(Entity targetEntity) { SendEvent((byte)DebugEventType.ShoutAt, writer => writer.Write(targetEntity.Id)); }

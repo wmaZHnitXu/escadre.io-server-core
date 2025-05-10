@@ -2,7 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 
 // Измененный неймспейс
-namespace Server.Core.Primitives
+namespace Core.Primitives
 {
     /// <summary>
     /// Represents a 3D vector using single-precision floating-point numbers.

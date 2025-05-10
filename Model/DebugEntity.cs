@@ -1,7 +1,7 @@
 using System;
-using Server.Core.Primitives;
+using Core.Primitives;
 
-namespace Server.Core.Model
+namespace Core.Model
 {
     public class DebugEntity : Entity
     {

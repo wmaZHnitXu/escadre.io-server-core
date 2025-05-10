@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Server.Core.Model
+namespace Core.Model
 {
     public class Level
     {
@@ -47,6 +47,20 @@ namespace Server.Core.Model
             }
         }
 
+        public IEnumerable<Entity> GetAllEntities() {
+            return _entities;
+        }
+
+        public bool TryGetEntity(int entityId, out Entity result) {
+            for (int i = 0; i < _entities.Count; i++) {
+                if (_entities[i].Id == entityId) {
+                    result = _entities[i];
+                    return true;
+                }
+            }
+            result = null;
+            return false;
+        }
 
         protected void AddAddedEntities()
         {

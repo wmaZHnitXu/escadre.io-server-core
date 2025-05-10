@@ -1,4 +1,4 @@
-namespace Server.Core.Model
+namespace Core.Model
 {
     public interface IEntityObserver<TObservant> where TObservant : Entity
     {

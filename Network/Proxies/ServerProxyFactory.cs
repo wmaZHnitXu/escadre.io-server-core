@@ -1,6 +1,6 @@
 // File: Core/Network/Proxies/ServerProxyFactory.cs
 using System;
-using Server.Core.Model;
+using Core.Model;
 using Core.Network;
 
 namespace Core.Network.Proxies

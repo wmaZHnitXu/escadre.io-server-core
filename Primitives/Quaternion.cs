@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
 
-namespace Server.Core.Primitives
+namespace Core.Primitives
 {
     /// <summary>
     /// Represents a rotation using single-precision floating-point numbers (x, y, z, w).
