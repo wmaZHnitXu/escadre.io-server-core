@@ -10,11 +10,24 @@ namespace Core.Network
     // --- Enums and Client Proxy Interface remain the same ---
     public enum MessageType : byte
     {
+        // S->C Lifecycle & State
         CreateEntity = 1,
         DestroyEntity = 2,
-        UpdateState = 3,
+        UpdateState = 3,    // Authoritative state sent by server
         EntityEvent = 4,
-        ClientSyncState = 5,
+
+        // C->S State Sync & View Updates
+        _ClientSyncState = 5, // Client sends its checksum
+        _UpdateViewPosition = 6, // Client sends its camera/view position (ONLY if PVS is not escadre-centered)
+                                 // For escadre-centered PVS, this is NOT needed.
+
+        // C->S Player Commands
+        _SetCourse = 10,
+        _AttackEscadre = 11,
+        _CancelAttack = 12,
+        _UpgradeShip = 13,
+        _BuyShip = 14,
+        //_ChangeShipFormation = 15, // Example for later
     }
     public interface IClientProxy
     {

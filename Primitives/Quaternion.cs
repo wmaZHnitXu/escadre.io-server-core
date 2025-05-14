@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using Core.Logging;
 
 namespace Core.Primitives
 {
@@ -152,6 +153,43 @@ namespace Core.Primitives
                 else { float s = 2.0f * MathF.Sqrt(1.0f + m22 - m00 - m11); w = (m10 - m01) / s; x = (m02 + m20) / s; y = (m12 + m21) / s; z = 0.25f * s; }
             }
             return new Quaternion(x, y, z, w).Normalized; // Explicit normalization for robustness
+        }
+
+        /// <summary>
+        /// Returns the angle in degrees between two rotations a and b.
+        /// The result is always positive.
+        /// </summary>
+        public static float Angle(Quaternion a, Quaternion b)
+        {
+            // Ensure quaternions are normalized for accurate angle calculation
+            // Quaternion aNorm = a.Normalized; // Potentially expensive if called often
+            // Quaternion bNorm = b.Normalized;
+
+            // float dot = Dot(aNorm, bNorm);
+            float dot = Dot(a, b); // Assuming inputs are often normalized or close to it
+
+            // The dot product between two quaternions q1 and q2 is |q1||q2|cos(theta/2).
+            // For unit quaternions, this is cos(theta/2).
+            // Since q and -q represent the same rotation, we take the absolute value of the dot product
+            // to ensure we get the shortest angle.
+            // This means we are finding the angle for theta/2 in [0, PI/2], so theta in [0, PI].
+            float dotAbs = MathF.Abs(dot);
+
+            // Clamp dotAbs to the range [-1, 1] to prevent Acos from returning NaN due to precision errors
+            if (dotAbs > 1.0f)
+            {
+                if (dotAbs > 1.0f + Epsilon) // If significantly out of range, log it
+                {
+                    Logger.LogWarning($"Quaternion.Angle: Dot product {dotAbs} was > 1. Clamping. Input A: {a}, Input B: {b}");
+                }
+                dotAbs = 1.0f;
+            }
+
+            // angle = 2 * acos( |dot(a,b)| )
+            // This gives the angle in radians.
+            float angleRadians = 2.0f * MathF.Acos(dotAbs);
+
+            return angleRadians * Rad2Deg; // Convert to degrees
         }
 
         // --- Operators ---

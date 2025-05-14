@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Core.Logging;
 
 namespace Core.Model
 {
@@ -9,6 +10,8 @@ namespace Core.Model
         private List<Entity> _toAdd = new();
         private Queue<int> _idsFreed = new();
         private int _maxIdAllocated = 0;
+
+        private Dictionary<int, Escadre> _escadresByOwnerId = new ();
 
         public delegate void OnEntityAdded(Entity entity);
         public event OnEntityAdded OnEntityAddedEvent;
@@ -59,6 +62,40 @@ namespace Core.Model
                 }
             }
             result = null;
+            return false;
+        }
+
+        public bool AddEscadre(Escadre escadre)
+        {
+            if (escadre == null || _escadresByOwnerId.ContainsKey(escadre.OwnerClientId))
+            {
+                Logger.LogWarning($"[Level] Failed to add escadre for Client {escadre?.OwnerClientId}. Already exists or null.");
+                return false;
+            }
+            _escadresByOwnerId.Add(escadre.OwnerClientId, escadre);
+            // if (!_activeEscadres.Contains(escadre)) _activeEscadres.Add(escadre); // If using list
+            Logger.Log($"[Level] Added Escadre for Client {escadre.OwnerClientId}.");
+            return true;
+        }
+
+        public bool TryGetEscadre(int ownerClientId, out Escadre escadre)
+        {
+            return _escadresByOwnerId.TryGetValue(ownerClientId, out escadre);
+        }
+        public IEnumerable<Escadre> GetAllEscadres() // For iterating all escadres if needed
+        {
+            return _escadresByOwnerId.Values;
+        }
+
+        public bool RemoveEscadre(int ownerClientId)
+        {
+            if (_escadresByOwnerId.Remove(ownerClientId, out Escadre escadre))
+            {
+                // if (_activeEscadres.Contains(escadre)) _activeEscadres.Remove(escadre); // If using list
+                Logger.Log($"[Level] Removed Escadre for Client {ownerClientId}.");
+                return true;
+            }
+            Logger.LogWarning($"[Level] Failed to remove escadre for Client {ownerClientId}. Not found.");
             return false;
         }
 
