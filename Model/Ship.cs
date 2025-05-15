@@ -2,51 +2,39 @@
 using System;
 using Core.Primitives;
 using Core.Logging;
+using System.Linq;
+using System.Collections.Generic;
 
 namespace Core.Model
 {
-    public class Ship : DestructibleEntity
+    public abstract class Ship : DestructibleEntity
     {
-        // --- Properties ---
-        public int ShipDesignId { get; private set; } // Identifies the type/class of ship (e.g., frigate, destroyer)
-        public int OwningEscadreClientId { get; private set; } // The ClientId of the Escadre this ship belongs to
+        protected readonly Escadre _owningEscadre;
 
-        public float CurrentSpeed { get; private set; }
-        public float MaxSpeed { get; private set; }
-        public float TurnRate { get; private set; } // Degrees per second or similar
+        // --- Abstract Stats to be defined by concrete ship classes ---
+        public abstract float MaxSpeed { get; protected set; }
+        public abstract float TurnRate { get; protected set; } // Degrees per second
+        public abstract float AttackDamage { get; protected set; }
+        public abstract float AttackRange { get; protected set; }
+        public abstract float AttackCooldown { get; protected set; }
 
-        // Combat properties
-        public float AttackDamage { get; private set; }
-        public float AttackRange { get; private set; }
-        public float AttackCooldown { get; private set; }
-        private float _currentAttackCooldown = 0f;
+        // --- Properties with shared logic ---
+        public int OwningEscadreClientId => _owningEscadre.OwnerClientId;
+        public float CurrentSpeed { get; protected set; }
+        protected float _currentAttackCooldown = 0f;
+        protected Vector2? _movementTargetPosition;
 
-        // Movement target (local to the ship, might be set by Escadre)
-        private Vector2? _movementTargetPosition;
-        // Attack order details
-        private int? _targetEscadreOwnerClientId; // The ClientID of the escadre to target
-
-        public override EntityTypeEnum EntityType => EntityTypeEnum.Ship;
-
-        public Ship(Level level, int ownerEscadreClientId, int shipDesignId, Vector3 initialPosition, float maxHealth = 100f)
+        public Ship(Level level, Escadre ownerEscadre, Vector3 initialPosition, float maxHealth) // MaxHealth is passed from concrete constructor
             : base(level, maxHealth)
         {
-            OwningEscadreClientId = ownerEscadreClientId;
-            ShipDesignId = shipDesignId; // Load stats based on this ID later
+            _owningEscadre = ownerEscadre ?? throw new ArgumentNullException(nameof(ownerEscadre));
             Position = initialPosition;
-
-            // TODO: Load these stats from a ShipDesignData store based on shipDesignId
-            MaxSpeed = 5f; // Example
-            TurnRate = 90f; // Example
-            AttackDamage = 10f; // Example
-            AttackRange = 20f; // Example
-            AttackCooldown = 2f; // Example
+            // Concrete ship constructors will set MaxHealth (passed to base) and the abstract stats.
         }
 
         public override void Update(float delta)
         {
-            base.Update(delta); // Call base Entity update if any
-
+            base.Update(delta); // Handles OnDamaged event if base class needs to
             if (IsDead) return;
 
             UpdateMovement(delta);
@@ -58,119 +46,114 @@ namespace Core.Model
             }
         }
 
-        // --- Public Methods for Escadre/System Interaction ---
-
-        /// <summary>
-        /// Sets the ship's individual movement target. Usually directed by its Escadre.
-        /// </summary>
         public void SetMovementTarget(Vector2? target)
         {
             _movementTargetPosition = target;
-            // Logger.Log($"[Ship {Id}] New movement target: {target}");
         }
 
         /// <summary>
-        /// Assigns an attack order to target ships from a specific enemy escadre.
+        /// Placeholder for upgrade logic. Resource checking and deduction
+        /// will be handled by an external system or Escadre.
+        /// This method should only apply the stat changes to the ship.
         /// </summary>
-        public void AssignAttackOrder(int? targetEscadreOwnerClientId)
+        public virtual void PerformUpgrade()
         {
-            _targetEscadreOwnerClientId = targetEscadreOwnerClientId;
-             if(targetEscadreOwnerClientId.HasValue)
-                 Logger.Log($"[Ship {Id}] Assigned attack order for escadre of client: {targetEscadreOwnerClientId.Value}");
-             else
-                 Logger.Log($"[Ship {Id}] Attack order cancelled.");
+            // Logger.Log($"[Ship {Id}] PerformUpgrade called. (Base implementation is empty)");
+            // Concrete ships will override this to change their abstract stats
+            // e.g., MaxSpeed += 1f; MaxHealth += 20f; CurrentHealth = MaxHealth;
+            // This might also trigger a specific "UpgradedEvent" for network proxies if needed.
         }
-
-        /// <summary>
-        /// Attempts to perform an upgrade.
-        /// </summary>
-        public void PerformUpgrade()
-        {
-            // TODO: Check resources from Escadre, apply upgrade from ShipDesignData
-            Logger.Log($"[Ship {Id}] PerformUpgrade called. (NotImplemented)");
-            throw new NotImplementedException("Ship.PerformUpgrade");
-        }
-
-        // --- Internal Logic ---
 
         protected virtual void UpdateMovement(float delta)
         {
             if (!_movementTargetPosition.HasValue)
             {
-                CurrentSpeed = 0f; // Stop if no target
+                CurrentSpeed = 0f;
                 return;
             }
 
             Vector2 currentPos2D = new Vector2(Position.X, Position.Z);
             Vector2 targetPos2D = _movementTargetPosition.Value;
-            Vector2 directionToTarget = (targetPos2D - currentPos2D).Normalized;
+            Vector2 toTarget = targetPos2D - currentPos2D;
 
-            if ((targetPos2D - currentPos2D).SqrMagnitude < 0.1f * 0.1f) // Close enough
+            if (toTarget.SqrMagnitude < 0.1f * 0.1f)
             {
-                _movementTargetPosition = null; // Arrived
+                _movementTargetPosition = null;
                 CurrentSpeed = 0f;
-                Position = new Vector3(targetPos2D.X, Position.Y, targetPos2D.Y); // Snap to target
+                Position = new Vector3(targetPos2D.X, Position.Y, targetPos2D.Y);
                 return;
             }
 
-            // --- Basic Movement & Rotation ---
-            // TODO: Implement proper steering behaviors (e.g., seek, arrive) and smooth rotation
-            CurrentSpeed = MaxSpeed; // Simplified: always max speed when moving
+            Vector2 directionToTarget = toTarget.Normalized;
+            CurrentSpeed = MaxSpeed; // Assumes full speed towards target
 
-            // Target direction for rotation
             Vector3 targetForward = new Vector3(directionToTarget.X, 0, directionToTarget.Y);
-            if (targetForward.SqrMagnitude > Primitives.Vector3.Epsilon * Primitives.Vector3.Epsilon) // Ensure not zero vector
+            if (targetForward.SqrMagnitude > Primitives.Vector3.Epsilon)
             {
                 Quaternion targetRotation = Primitives.Quaternion.LookRotation(targetForward, Primitives.Vector3.Up);
-                Rotation = Primitives.Quaternion.Slerp(Rotation, targetRotation, TurnRate * delta / Primitives.Quaternion.Angle(Rotation, targetRotation)); // Simplified slerp based turnrate
+                Rotation = Primitives.Quaternion.RotateTowards(Rotation, targetRotation, TurnRate * delta);
             }
 
-            // Move
-            Vector3 velocity = new Vector3(directionToTarget.X, 0, directionToTarget.Y) * CurrentSpeed * delta;
+            // Move based on current rotation and speed
+            Vector3 velocity = Rotation * Primitives.Vector3.Forward * CurrentSpeed * delta;
             Position += velocity;
-
-            // Logger.Log($"[Ship {Id}] Moving. Pos: {Position}, Target: {_movementTargetPosition}");
         }
-
 
         protected virtual void UpdateAttack(float delta)
         {
-            if (!_targetEscadreOwnerClientId.HasValue || _currentAttackCooldown > 0f)
+            if (_owningEscadre.TargetEscadreOwnerClientIds.Count == 0 || _currentAttackCooldown > 0f)
             {
-                return; // No attack order or on cooldown
+                return;
             }
 
-            // Logger.Log($"[Ship {Id}] UpdateAttack called for target escadre {_targetEscadreOwnerClientId.Value}. (Actual targeting NotImplemented)");
-            // TODO: Implement targeting logic:
-            // 1. Get its Escadre via _level.TryGetEscadre(this.OwningEscadreClientId).
-            // 2. Use Escadre to find the target Escadre via _level.TryGetEscadre(_targetEscadreOwnerClientId.Value).
-            // 3. If target Escadre found, get its list of Ship IDs.
-            // 4. For each enemy Ship ID, get the Entity from _level.TryGetEntity().
-            // 5. Find the closest, living, in-range enemy Ship.
-            // 6. If found:
-            //    Logger.Log($"[Ship {Id}] Attacking target Ship {enemyShip.Id}!");
-            //    enemyShip.ApplyDamage(new DamageInfo(AttackDamage, DamageType.Kinetic, enemyShip.Position, (Position - enemyShip.Position).Normalized, Id, OwningEscadreClientId));
-            //    _currentAttackCooldown = AttackCooldown;
-            throw new NotImplementedException("Ship.UpdateAttack - Targeting logic");
+            DestructibleEntity bestTarget = null;
+            float minSqrDistance = float.MaxValue;
+            float attackRangeSqr = AttackRange * AttackRange;
+
+            foreach (int targetEscadreOwnerId in _owningEscadre.TargetEscadreOwnerClientIds)
+            {
+                if (_level.TryGetEscadre(targetEscadreOwnerId, out Escadre targetEscadre))
+                {
+                    foreach (int enemyShipId in targetEscadre.ShipEntityIds)
+                    {
+                        if (_level.TryGetEntity(enemyShipId, out Entity entity) && entity is DestructibleEntity enemyShip)
+                        {
+                            if (enemyShip.IsDead || enemyShip == this) continue;
+
+                            float sqrDist = (enemyShip.Position - Position).SqrMagnitude;
+                            if (sqrDist <= attackRangeSqr && sqrDist < minSqrDistance)
+                            {
+                                minSqrDistance = sqrDist;
+                                bestTarget = enemyShip;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (bestTarget != null)
+            {
+                Vector3 directionToBestTarget = (bestTarget.Position - Position).Normalized;
+                // Consider adding a check: is ship facing the target within a certain fire arc?
+                // float angleToTarget = Vector3.Angle(Rotation * Vector3.Forward, directionToBestTarget);
+                // if (angleToTarget < Config.ShipFiringArcDegrees) { ... }
+
+                Logger.Log($"[Ship {Id}] Attacking target Ship {bestTarget.Id}!");
+                bestTarget.ApplyDamage(new DamageInfo(AttackDamage, DamageType.Kinetic, bestTarget.Position, directionToBestTarget, Id, OwningEscadreClientId));
+                _currentAttackCooldown = AttackCooldown;
+            }
         }
 
         public override void ApplyDamage(DamageInfo damageInfo)
         {
-            base.ApplyDamage(damageInfo); // Applies damage, calls OnDamaged, checks for death
-            // Ship-specific reaction to damage (e.g., visual effects) could be triggered here
+            base.ApplyDamage(damageInfo);
         }
 
         protected override void Death()
         {
-            base.Death(); // Common DestructibleEntity death logic
-            // Ship-specific death logic (e.g., explosion, debris)
+            base.Death();
             Logger.Log($"[Ship {Id}] BOOM! Ship destroyed.");
-
-            // Notify its Escadre that it died
-            if(_level.TryGetEscadre(OwningEscadreClientId, out Escadre escadre))
-            {
-                escadre.HandleShipDestroyed(this.Id);
-            }
+            _owningEscadre.HandleShipDestroyed(this.Id);
         }
     }
 }

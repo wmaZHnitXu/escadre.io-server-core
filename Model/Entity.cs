@@ -8,7 +8,7 @@ namespace Core.Model
         public enum EntityTypeEnum
         {
             Debug,
-            Ship
+            DefaultShip
         }
         public abstract EntityTypeEnum EntityType { get; }
         public int Id { get; private set; }

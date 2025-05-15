@@ -7,52 +7,55 @@ using Core.Logging;
 
 namespace Core.Model
 {
-    /// <summary>
-    /// Represents a player's escadre (squadron) of ships.
-    /// Manages the ships, resources, and high-level orders.
-    /// Does NOT inherit from Entity. Its lifecycle is tied to ClientConnection.
-    /// </summary>
     public class Escadre
     {
-        public int OwnerClientId { get; } // ID of the client owning this escadre
-        private readonly Level _level;     // Reference to the level for entity interactions
+        public int OwnerClientId { get; }
+        private readonly Level _level;
 
         private readonly List<int> _shipEntityIds = new List<int>();
         public IReadOnlyList<int> ShipEntityIds => _shipEntityIds.AsReadOnly();
 
         private Vector2? _currentDestination;
-        private int? _currentTargetEscadreOwnerClientId; // The ClientID of the escadre to target
+        // Changed to a HashSet to support multiple attack targets
+        private readonly HashSet<int> _targetEscadreOwnerClientIds = new HashSet<int>();
+        public IReadOnlyCollection<int> TargetEscadreOwnerClientIds => _targetEscadreOwnerClientIds;
 
-        public int Resources { get; private set; } // Generic "gear" resource
+
+        public int Resources { get; private set; }
 
         public Escadre(int ownerClientId, Level level)
         {
             OwnerClientId = ownerClientId;
             _level = level ?? throw new ArgumentNullException(nameof(level));
-            Resources = 100; // Starting resources example
+            Resources = 100;
             Logger.Log($"[Escadre for Client {OwnerClientId}] Created.");
         }
 
         /// <summary>
-        /// Adds a ship to this escadre's control. Called internally.
+        /// Adds a ship to this escadre's control. Called internally by CoreComposer.
         /// </summary>
-        private void AddShip(Ship ship)
+        internal void AddShip(Ship ship) // Changed to internal and takes Ship
         {
             if (ship == null || ship.OwningEscadreClientId != OwnerClientId)
             {
-                Logger.LogWarning($"[Escadre {OwnerClientId}] Attempted to add invalid ship (null or wrong owner).");
+                Logger.LogWarning($"[Escadre {OwnerClientId}] Attempted to add invalid ship (null or wrong owner). Ship ID: {ship?.Id}");
                 return;
             }
             if (!_shipEntityIds.Contains(ship.Id))
             {
                 _shipEntityIds.Add(ship.Id);
                 Logger.Log($"[Escadre {OwnerClientId}] Added Ship {ship.Id}. Total ships: {_shipEntityIds.Count}");
+                // If the escadre has an active movement or attack order, apply it to the new ship
+                if (_currentDestination.HasValue)
+                {
+                     // Simplistic: all ships go to the same point.
+                     // Real implementation would use formation logic.
+                    ship.SetMovementTarget(_currentDestination.Value);
+                }
+                // Ships will pick up attack orders automatically in their UpdateAttack if _targetEscadreOwnerClientIds is populated
             }
         }
 
-        /// <summary>
-        /// Removes a ship from this escadre's control. Called internally.
-        /// </summary>
         private void RemoveShip(int shipId)
         {
             if (_shipEntityIds.Remove(shipId))
@@ -61,47 +64,37 @@ namespace Core.Model
                 if (!_shipEntityIds.Any())
                 {
                     Logger.Log($"[Escadre {OwnerClientId}] All ships lost!");
-                    // Notify ClientConnection or Level that this escadre is effectively destroyed
-                    // This logic will be handled via ClientConnection state changes.
+                    // ClientConnection state will be updated by higher-level logic observing Escadre state or ship count.
                 }
             }
         }
 
-        /// <summary>
-        /// Called by a Ship when it is destroyed.
-        /// </summary>
         internal void HandleShipDestroyed(int shipId)
         {
             RemoveShip(shipId);
         }
 
-
-        // --- Public Use Case Methods (Called by ClientConnection) ---
-
-        /// <summary>
-        /// Sets a new course (destination) for the entire escadre.
-        /// </summary>
         public void SetCourse(Vector2 destination)
         {
             _currentDestination = destination;
-            _currentTargetEscadreOwnerClientId = null; // Moving cancels attack order
-            Logger.Log($"[Escadre {OwnerClientId}] Setting course to {destination}. Cancelling any attack orders.");
+            if (_targetEscadreOwnerClientIds.Any()) // Only log cancellation if there were targets
+            {
+                Logger.Log($"[Escadre {OwnerClientId}] Setting course to {destination}. Cancelling attack orders.");
+                _targetEscadreOwnerClientIds.Clear(); // Moving cancels all attack orders
+            } else {
+                Logger.Log($"[Escadre {OwnerClientId}] Setting course to {destination}.");
+            }
 
-            // TODO: Distribute movement targets to individual ships based on formation/destination
+
             foreach (int shipId in _shipEntityIds)
             {
                 if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
                 {
-                    // Simplistic: all ships go to the same point.
-                    // Real implementation would use formation logic.
                     ship.SetMovementTarget(destination);
                 }
             }
         }
 
-        /// <summary>
-        /// Orders the escadre to attack ships belonging to another client's escadre.
-        /// </summary>
         public void OrderAttack(int targetOwnerClientId)
         {
             if (targetOwnerClientId == OwnerClientId)
@@ -110,52 +103,80 @@ namespace Core.Model
                 return;
             }
 
-            _currentTargetEscadreOwnerClientId = targetOwnerClientId;
-            _currentDestination = null; // Attacking cancels movement order
-            Logger.Log($"[Escadre {OwnerClientId}] Ordering attack on escadre of Client {targetOwnerClientId}. Cancelling any movement orders.");
-
-            foreach (int shipId in _shipEntityIds)
+            if (_targetEscadreOwnerClientIds.Add(targetOwnerClientId)) // Add returns true if item was added (not already present)
             {
-                if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
+                 Logger.Log($"[Escadre {OwnerClientId}] Added attack order on escadre of Client {targetOwnerClientId}. Current targets: {string.Join(", ", _targetEscadreOwnerClientIds)}");
+            } else {
+                 Logger.Log($"[Escadre {OwnerClientId}] Already targeting escadre of Client {targetOwnerClientId}. Current targets: {string.Join(", ", _targetEscadreOwnerClientIds)}");
+            }
+
+            if(_currentDestination.HasValue) // Attacking cancels movement order
+            {
+                _currentDestination = null;
+                Logger.Log($"[Escadre {OwnerClientId}] Attack order initiated. Cancelling any movement orders and stopping ships.");
+                // Stop ships if they were moving
+                foreach (int shipId in _shipEntityIds)
                 {
-                    ship.AssignAttackOrder(targetOwnerClientId);
+                    if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
+                    {
+                        ship.SetMovementTarget(null);
+                    }
                 }
             }
+            // Ships will pick up the new target in their UpdateAttack logic. No need to iterate and call AssignAttackOrder.
         }
 
-        /// <summary>
-        /// Cancels any current attack order for all ships in the escadre.
-        /// </summary>
-        public void OrderCancelAttack()
+        public void OrderCancelAttack() // Cancels ALL attack orders
         {
-            _currentTargetEscadreOwnerClientId = null;
-            Logger.Log($"[Escadre {OwnerClientId}] Cancelling attack order.");
-            foreach (int shipId in _shipEntityIds)
+            if (_targetEscadreOwnerClientIds.Any())
             {
-                if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
-                {
-                    ship.AssignAttackOrder(null); // Pass null to cancel
-                }
+                _targetEscadreOwnerClientIds.Clear();
+                Logger.Log($"[Escadre {OwnerClientId}] Cancelling ALL attack orders.");
+                // Ships will stop attacking as _targetEscadreOwnerClientIds will be empty.
+            } else {
+                Logger.Log($"[Escadre {OwnerClientId}] No active attack orders to cancel.");
             }
         }
 
-        /// <summary>
-        /// Requests to buy a new ship for the escadre. (Placeholder)
-        /// </summary>
-        public void RequestBuyShip(int shipDesignToBuy)
+        // Optional: Cancel attack on a specific escadre
+        public void OrderCancelAttackOn(int targetOwnerClientId)
+        {
+            if (_targetEscadreOwnerClientIds.Remove(targetOwnerClientId))
+            {
+                Logger.Log($"[Escadre {OwnerClientId}] Cancelled attack order on escadre of Client {targetOwnerClientId}. Remaining targets: {string.Join(", ", _targetEscadreOwnerClientIds)}");
+            } else {
+                Logger.Log($"[Escadre {OwnerClientId}] Was not targeting escadre of Client {targetOwnerClientId}. No change to attack orders.");
+            }
+        }
+
+
+        public void RequestBuyShip(int shipDesignToBuy) // shipDesignToBuy could now be an enum or type identifier
         {
             // TODO: Check resources, ship limits, shipyard proximity etc.
             // If successful:
             // 1. Deduct resources.
-            // 2. Create new Ship entity (_level.AddEntity(new Ship(...))).
-            // 3. Call private AddShip(newShipInstance).
+            // 2. Create new Ship entity (e.g., new Frigate(_level, this, spawnPosition)).
+            //    Level.AddEntity() is called by Entity constructor.
+            // 3. Call this.AddShip(newShipInstance).
             Logger.Log($"[Escadre {OwnerClientId}] RequestBuyShip called for design {shipDesignToBuy}. (NotImplemented)");
+
+            // Example for a DefaultShip
+            // if (Resources >= 50) // Cost of DefaultShip
+            // {
+            //     Resources -= 50;
+            //     Vector3 spawnPosition = CalculateCenterPoint() + new Vector3(UnityEngine.Random.Range(-5f, 5f), 0, UnityEngine.Random.Range(-5f, 5f)); // Offset from escadre center
+            //     var newShip = new DefaultShip(_level, this, spawnPosition); // Assuming DefaultShip exists
+            //     // AddShip(newShip); // Ship constructor calls _level.AddEntity. Escadre.AddShip is called by CoreComposer or similar post-creation.
+            //                               // Actually, better for RequestBuyShip to fully manage the ship creation and addition to escadre.
+            //                               // The ship's constructor will add it to the _level.
+            //                               // Then this method should call this.AddShip(newShip).
+            //     Logger.Log($"[Escadre {OwnerClientId}] Bought ship. New ship ID will be {newShip.Id} (once processed by Level).");
+            // } else {
+            //     Logger.LogWarning($"[Escadre {OwnerClientId}] Not enough resources to buy ship design {shipDesignToBuy}.");
+            // }
             throw new NotImplementedException("Escadre.RequestBuyShip");
         }
 
-        /// <summary>
-        /// Requests to upgrade an existing ship in the escadre.
-        /// </summary>
         public void RequestUpgradeShip(int shipId)
         {
             if (!_shipEntityIds.Contains(shipId))
@@ -165,8 +186,16 @@ namespace Core.Model
             }
             if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
             {
-                 // TODO: Check resources, upgrade paths, etc.
-                Logger.Log($"[Escadre {OwnerClientId}] Requesting upgrade for Ship {shipId}.");
+                // TODO: Check resources, upgrade paths, etc.
+                // Example:
+                // int upgradeCost = GetUpgradeCost(ship.EntityType); // You'd need a way to get cost
+                // if (Resources >= upgradeCost) {
+                //    Resources -= upgradeCost;
+                //    Logger.Log($"[Escadre {OwnerClientId}] Requesting upgrade for Ship {shipId}. Deducted {upgradeCost} resources.");
+                //    ship.PerformUpgrade();
+                // } else {
+                //    Logger.LogWarning($"[Escadre {OwnerClientId}] Not enough resources to upgrade Ship {shipId}.");
+                // }
                 ship.PerformUpgrade(); // Ship handles its own upgrade logic
             }
             else
@@ -175,13 +204,9 @@ namespace Core.Model
             }
         }
 
-        /// <summary>
-        /// Calculates the average position of all living ships in the escadre.
-        /// Used by ClientConnection for IClientView.Position.
-        /// </summary>
         internal Vector3 CalculateCenterPoint()
         {
-            if (!_shipEntityIds.Any()) return Vector3.Zero; // Or some default spawn point
+            if (!_shipEntityIds.Any()) return Vector3.Zero;
 
             Vector3 sumPositions = Vector3.Zero;
             int aliveShipCount = 0;
@@ -194,17 +219,12 @@ namespace Core.Model
                     aliveShipCount++;
                 }
             }
-
             return aliveShipCount > 0 ? sumPositions / aliveShipCount : Vector3.Zero;
         }
 
-        /// <summary>
-        /// Kills all ships in the escadre silently. Used when client disconnects or escadre is disbanded.
-        /// </summary>
         internal void Disband(bool silentKill = true)
         {
              Logger.Log($"[Escadre {OwnerClientId}] Disbanding (silent: {silentKill}). Killing all ships.");
-             // Iterate a copy as Kill() might modify the _shipEntityIds list via HandleShipDestroyed
              var idsToKill = new List<int>(_shipEntityIds);
              foreach (int shipId in idsToKill)
              {
@@ -213,7 +233,7 @@ namespace Core.Model
                      entity.Kill(silentKill);
                  }
              }
-             _shipEntityIds.Clear(); // Ensure list is cleared even if some ships weren't found/already dead
+             _shipEntityIds.Clear();
         }
     }
 }

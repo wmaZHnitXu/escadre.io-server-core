@@ -13,14 +13,13 @@ namespace Core
     public class CoreComposer : IDisposable
     {
         public Level ServerLevel { get; }
-        public VisibilityManager VisibilityManager { get; } // Made public readonly
+        public VisibilityManager VisibilityManager { get; }
         private readonly ServerReplicationManager _replicationManager;
-        private readonly IVisibilityStrategy _visibilityStrategy; // Store for disposal
+        private readonly IVisibilityStrategy _visibilityStrategy;
         private bool _isDisposed = false;
         private readonly Dictionary<int, ClientConnection> _clientConnections = new Dictionary<int, ClientConnection>();
         public IReadOnlyDictionary<int, ClientConnection> ClientConnections => _clientConnections;
 
-        // Constructor now accepts a visibility STRATEGY
         public CoreComposer(IServerNetworkLayer networkLayer, IVisibilityStrategy visibilityStrategy)
         {
             if (networkLayer == null) throw new ArgumentNullException(nameof(networkLayer));
@@ -28,22 +27,18 @@ namespace Core
 
             Logger.Log("[CoreComposer] Initializing Core Systems...");
 
-            // 1. Initialize Model
             ServerLevel = new Level();
             Logger.Log("[CoreComposer] Level created.");
 
-            // 2. Create VisibilityManager using the provided strategy
-            VisibilityManager = new VisibilityManager(_visibilityStrategy); // Create and store
+            VisibilityManager = new VisibilityManager(_visibilityStrategy);
             Logger.Log("[CoreComposer] VisibilityManager created.");
 
-            // 3. Initialize Networking, passing the created VisibilityManager and client connections dictionary
             _replicationManager = new ServerReplicationManager(ServerLevel, networkLayer, VisibilityManager, _clientConnections);
             Logger.Log("[CoreComposer] ServerReplicationManager created.");
 
             Logger.Log("[CoreComposer] Initialization Complete.");
         }
 
-        // Client Management methods (RegisterClient, UnregisterClient) remain the same as previous correct version
         public ClientConnection RegisterClient(int clientId, float initialPvsRadius = 100f, Vector3? initialSpawnPosition = null)
         {
             if (_isDisposed) { Logger.LogWarning("[CoreComposer] Attempted to register client on disposed composer."); return null; }
@@ -51,15 +46,32 @@ namespace Core
 
             var clientConnection = new ClientConnection(clientId, initialPvsRadius);
             _clientConnections.Add(clientId, clientConnection);
-            VisibilityManager.AddOrUpdateClientView(clientConnection);
+            VisibilityManager.AddOrUpdateClientView(clientConnection); // Register client view first
 
             Escadre escadre = new Escadre(clientId, ServerLevel);
-            ServerLevel.AddEscadre(escadre);
-            clientConnection.AssignEscadre(escadre);
+            if (!ServerLevel.AddEscadre(escadre)) // Ensure escadre is added to level
+            {
+                Logger.LogError($"[CoreComposer] Failed to add escadre for client {clientId} to Level. Aborting client registration.");
+                _clientConnections.Remove(clientId);
+                VisibilityManager.RemoveClientView(clientId);
+                return null;
+            }
+            clientConnection.AssignEscadre(escadre); // Assign escadre to client connection
 
-            Vector3 spawnPos = initialSpawnPosition ?? clientConnection.Position;
-            Ship initialShip = new Ship(ServerLevel, clientId, shipDesignId: 0, initialPosition: spawnPos);
-            Logger.Log($"[CoreComposer] Client {clientId} registered. Escadre/Ship created. PVS Radius: {initialPvsRadius}");
+            Vector3 spawnPos = initialSpawnPosition ?? clientConnection.Position; // clientConnection.Position might be 0,0,0 if no escadre yet
+                                                                                  // Better to ensure spawnPos is reasonable if not provided.
+            if (!initialSpawnPosition.HasValue) spawnPos = new Vector3(UnityEngine.Random.Range(-50f,50f), 0, UnityEngine.Random.Range(-50f,50f));
+
+
+            // Instantiate a concrete ship type, e.g., DefaultShip
+            // The Ship's constructor now takes the Escadre instance.
+            // The Ship's constructor will call _level.AddEntity(this).
+            Ship initialShip = new DefaultShip(ServerLevel, escadre, spawnPos);
+
+            // Explicitly add the created ship to its escadre's management list
+            escadre.AddShip(initialShip);
+
+            Logger.Log($"[CoreComposer] Client {clientId} registered. Escadre {escadre.OwnerClientId} and initial Ship (ID pending: {initialShip.Id}) created. PVS Radius: {initialPvsRadius}");
             return clientConnection;
         }
         public void UnregisterClient(int clientId)
@@ -71,10 +83,13 @@ namespace Core
                 VisibilityManager.RemoveClientView(clientId);
                 if (clientConnection.EscadreInstance != null)
                 {
-                    clientConnection.EscadreInstance.Disband(true);
-                    ServerLevel.RemoveEscadre(clientConnection.EscadreInstance.OwnerClientId);
-                    clientConnection.ClearEscadreReference();
+                    clientConnection.EscadreInstance.Disband(true); // Kills ships
+                    ServerLevel.RemoveEscadre(clientConnection.EscadreInstance.OwnerClientId); // Removes escadre from level
                 }
+                // ClearEscadreReference is implicitly handled by AssignEscadre(null) or state changes,
+                // but can be called explicitly if needed. Here, escadre is gone.
+                clientConnection.ClearEscadreReference(); // Ensure ClientConnection no longer holds it
+
                 _clientConnections.Remove(clientId);
             } else { Logger.LogWarning($"[CoreComposer] Attempted to unregister unknown client: {clientId}"); }
         }
@@ -85,23 +100,34 @@ namespace Core
             if (_isDisposed) return;
             try
             {
-                ServerLevel.DoUpdate(deltaTime);
+                // 1. Update Game Model (Entities, Level systems)
+                ServerLevel.DoUpdate(deltaTime); // This updates all entities, including ships
 
-                foreach (var entity in ServerLevel.GetAllEntities())
+                // 2. Update Visibility System
+                // Update entity positions within the visibility strategy
+                foreach (var entity in ServerLevel.GetAllEntities()) // Consider only entities that moved or changed state
                 {
-                    if (!entity.IsDead) VisibilityManager.UpdateEntityPosition(entity);
+                    if (!entity.IsDead) // Only track alive entities for visibility updates
+                    {
+                        VisibilityManager.RegisterEntity(entity); // Use RegisterEntity, it handles AddOrUpdate
+                    }
+                    // If an entity just died, ServerReplicationManager handles unregistering it from visibility via HandleEntityDeath.
                 }
+
+                // Update client view positions/radii in the visibility strategy
                 foreach (var clientConn in _clientConnections.Values)
                 {
-                    // Update PVS center for clients with active escadres
-                    if (clientConn.CurrentState == ClientState.InSea && clientConn.EscadreInstance != null)
-                    {
-                        VisibilityManager.AddOrUpdateClientView(clientConn);
-                    }
-                    // For spectating clients, their camera position would need to be updated
-                    // via a C->S message, which would then call AddOrUpdateClientView.
+                    // IClientView.Position for PVS is driven by Escadre's center or spectator cam.
+                    // Escadre.CalculateCenterPoint() is called when clientConn.Position is accessed.
+                    // VisibilityManager.AddOrUpdateClientView will refresh it.
+                    VisibilityManager.AddOrUpdateClientView(clientConn);
                 }
+
+                // Recalculate PVS for all clients
                 VisibilityManager.UpdateAllClientVisibility();
+
+                // 3. Replication Manager handles messages based on visibility changes (done via events)
+                // _replicationManager doesn't have an Update method; it's event-driven.
             }
             catch (Exception ex) { Logger.LogError($"[CoreComposer] Error during Update loop: {ex.Message}\nStackTrace: {ex.StackTrace}"); }
         }
@@ -110,14 +136,14 @@ namespace Core
         {
             if (_isDisposed) return; _isDisposed = true;
             Logger.Log("[CoreComposer] Disposing...");
-            var clientIds = new List<int>(_clientConnections.Keys); // Operate on a copy
+            var clientIds = new List<int>(_clientConnections.Keys);
             foreach (var clientId in clientIds) { UnregisterClient(clientId); }
             _clientConnections.Clear();
 
             _replicationManager?.Dispose();
-            VisibilityManager?.Dispose(); // CoreComposer created it, so it disposes it
-            ServerLevel?.Destroy();
-            _visibilityStrategy?.Dispose(); // CoreComposer also disposes the strategy it was given
+            VisibilityManager?.Dispose();
+            ServerLevel?.Destroy(); // Destroys all entities in the level
+            _visibilityStrategy?.Dispose();
             Logger.Log("[CoreComposer] Dispose complete.");
         }
     }
