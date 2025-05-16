@@ -2,24 +2,23 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
-using Core.Model; // For EntityTypeEnum
-using Core.Primitives; // For Vector3, Quaternion
+using Core.Model;
+using Core.Primitives;
 
 namespace Core.Network
 {
-    // --- Enums and Client Proxy Interface remain the same ---
     public enum MessageType : byte
     {
         // S->C Lifecycle & State
         CreateEntity = 1,
-        DestroyEntity = 2,
-        UpdateState = 3,    // Authoritative state sent by server
-        EntityEvent = 4,
+        DestroyEntity = 2,  // Now specifically means "Loud Destruction, play effects"
+        VanishEntity = 3,   // Means "Entity removed from PVS or silently destroyed, cleanup proxy"
+        UpdateState = 4,
+        EntityEvent = 5,    // Note: Shifted EntityEvent down due to VanishEntity insertion
 
         // C->S State Sync & View Updates
-        _ClientSyncState = 5, // Client sends its checksum
-        _UpdateViewPosition = 6, // Client sends its camera/view position (ONLY if PVS is not escadre-centered)
-                                 // For escadre-centered PVS, this is NOT needed.
+        _ClientSyncState = 6,
+        _UpdateViewPosition = 7,
 
         // C->S Player Commands
         _SetCourse = 10,
@@ -27,48 +26,41 @@ namespace Core.Network
         _CancelAttack = 12,
         _UpgradeShip = 13,
         _BuyShip = 14,
-        //_ChangeShipFormation = 15, // Example for later
     }
     public interface IClientProxy
     {
         int EntityId { get; }
         Entity.EntityTypeEnum EntityType { get; }
-        void HandleNetworkMessage(MessageType messageType, BinaryReader reader); void NotifyDestroyed(); Vector3 Position { get; }
+        void HandleNetworkMessage(MessageType messageType, BinaryReader reader);
+        void NotifyDestroyed(); // Called when VanishEntity is received
+        Vector3 Position { get; }
         Quaternion Rotation { get; }
-        event Action OnDestroyed;
+        event Action OnDestroyed; // For final cleanup
+        event Action OnLoudDestructionSignaled; // For effects
     }
 
-
-    // --- UPDATED IServerProxy Interface ---
     public interface IServerProxy
     {
         int EntityId { get; }
-        Entity.EntityTypeEnum EntityType { get; } // Added: To get the type for CreateEntity
-        Vector3 Position { get; }               // Added: To get current common state for CreateEntity
-        Quaternion Rotation { get; }            // Added: To get current common state for CreateEntity
+        Entity.EntityTypeEnum EntityType { get; }
+        Vector3 Position { get; }
+        Quaternion Rotation { get; }
 
         void StartReplicating();
         void StopReplicating();
-
-        /// <summary> Checks client checksum. Returns true if correction needed. </summary>
         bool CheckClientSyncState(BinaryReader reader);
-
-        /// <summary> Serializes specific *initial* state for CreateEntity message. </summary>
-        void SerializeSpecificInitialState(BinaryWriter writer); // Renamed for clarity
-
-        /// <summary> Serializes full state for UpdateState correction message. </summary>
+        void SerializeSpecificInitialState(BinaryWriter writer);
         void SerializeCorrectionState(BinaryWriter writer);
 
-        /// <summary> Sends final destroy command to specified clients. </summary>
-        void SendDestroyMessage(IEnumerable<int> targetClientIds);
+        /// <summary> Sends Vanish command to specified clients for proxy cleanup. </summary>
+        void SendVanishMessage(IEnumerable<int> targetClientIds); // Renamed
     }
 
-    // --- Network Layer Interfaces remain the same ---
     public interface IServerNetworkLayer
     {
         void BroadcastRelevant(int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
         void SendToClient(int clientId, int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
-        void SendDestroyCommand(int entityId, IEnumerable<int> targetClientIds);
+        void SendVanishCommand(int entityId, IEnumerable<int> targetClientIds); // Added
         event Action<int, int, MessageType, BinaryReader> OnClientMessageReceived;
     }
     public interface IClientNetworkLayer
