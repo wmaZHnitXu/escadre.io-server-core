@@ -15,26 +15,48 @@ namespace Core.Model
         private readonly List<int> _shipEntityIds = new List<int>();
         public IReadOnlyList<int> ShipEntityIds => _shipEntityIds.AsReadOnly();
 
+        // Modified for cleaner public access for debugging and internal use
         private Vector2? _currentDestination;
-        // Changed to a HashSet to support multiple attack targets
+        public Vector2? CurrentDestination { get => _currentDestination; private set => _currentDestination = value; }
+
+
         private readonly HashSet<int> _targetEscadreOwnerClientIds = new HashSet<int>();
         public IReadOnlyCollection<int> TargetEscadreOwnerClientIds => _targetEscadreOwnerClientIds;
 
 
-        public int Resources { get; private set; }
+        private int _resources; // Backing field for Resources
+        public int Resources { get => _resources; private set => _resources = value; }
+
 
         public Escadre(int ownerClientId, Level level)
         {
             OwnerClientId = ownerClientId;
             _level = level ?? throw new ArgumentNullException(nameof(level));
-            Resources = 100;
+            _resources = 100;
             Logger.Log($"[Escadre for Client {OwnerClientId}] Created.");
         }
 
-        /// <summary>
-        /// Adds a ship to this escadre's control. Called internally by CoreComposer.
-        /// </summary>
-        internal void AddShip(Ship ship) // Changed to internal and takes Ship
+        // Added method to allow external systems (e.g., crate collection) to give resources
+        public void AddResources(int amount)
+        {
+            if (amount <= 0)
+            {
+                Logger.LogWarning($"[Escadre {OwnerClientId}] Attempted to add non-positive resources: {amount}. Ignored.");
+                return;
+            }
+            _resources += amount;
+            Logger.Log($"[Escadre {OwnerClientId}] Added {amount} resources. Total: {_resources}.");
+        }
+
+        // Helper for upgrade cost, could be more complex
+        private int GetUpgradeCostForShip(Ship ship)
+        {
+            // Example: cost could depend on ship type or current upgrade level
+            return 50; // Placeholder cost
+        }
+
+
+        internal void AddShip(Ship ship)
         {
             if (ship == null || ship.OwningEscadreClientId != OwnerClientId)
             {
@@ -45,14 +67,10 @@ namespace Core.Model
             {
                 _shipEntityIds.Add(ship.Id);
                 Logger.Log($"[Escadre {OwnerClientId}] Added Ship {ship.Id}. Total ships: {_shipEntityIds.Count}");
-                // If the escadre has an active movement or attack order, apply it to the new ship
-                if (_currentDestination.HasValue)
+                if (_currentDestination.HasValue) // Apply current escadre destination to new ship
                 {
-                     // Simplistic: all ships go to the same point.
-                     // Real implementation would use formation logic.
                     ship.SetMovementTarget(_currentDestination.Value);
                 }
-                // Ships will pick up attack orders automatically in their UpdateAttack if _targetEscadreOwnerClientIds is populated
             }
         }
 
@@ -64,7 +82,8 @@ namespace Core.Model
                 if (!_shipEntityIds.Any())
                 {
                     Logger.Log($"[Escadre {OwnerClientId}] All ships lost!");
-                    // ClientConnection state will be updated by higher-level logic observing Escadre state or ship count.
+                    // State change to Destroyed or Spectating for ClientConnection would be handled
+                    // by a system observing the Escadre or its ship count.
                 }
             }
         }
@@ -76,15 +95,14 @@ namespace Core.Model
 
         public void SetCourse(Vector2 destination)
         {
-            _currentDestination = destination;
-            if (_targetEscadreOwnerClientIds.Any()) // Only log cancellation if there were targets
+            CurrentDestination = destination; // Use the property setter
+            if (_targetEscadreOwnerClientIds.Any())
             {
                 Logger.Log($"[Escadre {OwnerClientId}] Setting course to {destination}. Cancelling attack orders.");
-                _targetEscadreOwnerClientIds.Clear(); // Moving cancels all attack orders
+                _targetEscadreOwnerClientIds.Clear();
             } else {
                 Logger.Log($"[Escadre {OwnerClientId}] Setting course to {destination}.");
             }
-
 
             foreach (int shipId in _shipEntityIds)
             {
@@ -103,42 +121,38 @@ namespace Core.Model
                 return;
             }
 
-            if (_targetEscadreOwnerClientIds.Add(targetOwnerClientId)) // Add returns true if item was added (not already present)
+            if (_targetEscadreOwnerClientIds.Add(targetOwnerClientId))
             {
                  Logger.Log($"[Escadre {OwnerClientId}] Added attack order on escadre of Client {targetOwnerClientId}. Current targets: {string.Join(", ", _targetEscadreOwnerClientIds)}");
             } else {
                  Logger.Log($"[Escadre {OwnerClientId}] Already targeting escadre of Client {targetOwnerClientId}. Current targets: {string.Join(", ", _targetEscadreOwnerClientIds)}");
             }
 
-            if(_currentDestination.HasValue) // Attacking cancels movement order
+            if(CurrentDestination.HasValue) // Use property getter
             {
-                _currentDestination = null;
+                CurrentDestination = null; // Attacking cancels movement order
                 Logger.Log($"[Escadre {OwnerClientId}] Attack order initiated. Cancelling any movement orders and stopping ships.");
-                // Stop ships if they were moving
                 foreach (int shipId in _shipEntityIds)
                 {
                     if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
                     {
-                        ship.SetMovementTarget(null);
+                        ship.SetMovementTarget(null); // Stop individual ships
                     }
                 }
             }
-            // Ships will pick up the new target in their UpdateAttack logic. No need to iterate and call AssignAttackOrder.
         }
 
-        public void OrderCancelAttack() // Cancels ALL attack orders
+        public void OrderCancelAttack()
         {
             if (_targetEscadreOwnerClientIds.Any())
             {
                 _targetEscadreOwnerClientIds.Clear();
                 Logger.Log($"[Escadre {OwnerClientId}] Cancelling ALL attack orders.");
-                // Ships will stop attacking as _targetEscadreOwnerClientIds will be empty.
             } else {
                 Logger.Log($"[Escadre {OwnerClientId}] No active attack orders to cancel.");
             }
         }
 
-        // Optional: Cancel attack on a specific escadre
         public void OrderCancelAttackOn(int targetOwnerClientId)
         {
             if (_targetEscadreOwnerClientIds.Remove(targetOwnerClientId))
@@ -150,30 +164,30 @@ namespace Core.Model
         }
 
 
-        public void RequestBuyShip(int shipDesignToBuy) // shipDesignToBuy could now be an enum or type identifier
+        public void RequestBuyShip(int shipDesignToBuy) // shipDesignToBuy could be an enum or type ID
         {
-            // TODO: Check resources, ship limits, shipyard proximity etc.
-            // If successful:
-            // 1. Deduct resources.
-            // 2. Create new Ship entity (e.g., new Frigate(_level, this, spawnPosition)).
-            //    Level.AddEntity() is called by Entity constructor.
-            // 3. Call this.AddShip(newShipInstance).
-            Logger.Log($"[Escadre {OwnerClientId}] RequestBuyShip called for design {shipDesignToBuy}. (NotImplemented)");
-
-            // Example for a DefaultShip
-            // if (Resources >= 50) // Cost of DefaultShip
+            // Example with DefaultShip
+            // if (shipDesignToBuy == (int)Entity.EntityTypeEnum.DefaultShip) // Assuming an ID mapping
             // {
-            //     Resources -= 50;
-            //     Vector3 spawnPosition = CalculateCenterPoint() + new Vector3(UnityEngine.Random.Range(-5f, 5f), 0, UnityEngine.Random.Range(-5f, 5f)); // Offset from escadre center
-            //     var newShip = new DefaultShip(_level, this, spawnPosition); // Assuming DefaultShip exists
-            //     // AddShip(newShip); // Ship constructor calls _level.AddEntity. Escadre.AddShip is called by CoreComposer or similar post-creation.
-            //                               // Actually, better for RequestBuyShip to fully manage the ship creation and addition to escadre.
-            //                               // The ship's constructor will add it to the _level.
-            //                               // Then this method should call this.AddShip(newShip).
-            //     Logger.Log($"[Escadre {OwnerClientId}] Bought ship. New ship ID will be {newShip.Id} (once processed by Level).");
+            //     int cost = 50; // Cost for DefaultShip
+            //     if (_resources >= cost)
+            //     {
+            //         _resources -= cost;
+            //         Vector3 spawnPosition = CalculateCenterPoint() + new Vector3(UnityEngine.Random.Range(-5f, 5f), 0, UnityEngine.Random.Range(-5f, 5f));
+            //         var newShip = new DefaultShip(_level, this, spawnPosition);
+            //         // AddShip(newShip); // The CoreComposer currently handles calling AddShip after creating the initial ship.
+            //                              // For subsequent buys, this method should create and then call AddShip.
+            //         Logger.Log($"[Escadre {OwnerClientId}] Bought DefaultShip. Remaining Res: {_resources}. Ship ID pending.");
+            //         // The newShip will be added to the Level via its constructor, and its ID assigned.
+            //         // Then this.AddShip(newShip) would add its ID to _shipEntityIds.
+            //         // This part needs careful orchestration if buy requests come from client commands.
+            //     } else {
+            //          Logger.LogWarning($"[Escadre {OwnerClientId}] Not enough resources to buy ship. Need {cost}, Have {_resources}.");
+            //     }
             // } else {
-            //     Logger.LogWarning($"[Escadre {OwnerClientId}] Not enough resources to buy ship design {shipDesignToBuy}.");
+            //      Logger.LogWarning($"[Escadre {OwnerClientId}] Unknown ship design to buy: {shipDesignToBuy}.");
             // }
+            Logger.Log($"[Escadre {OwnerClientId}] RequestBuyShip called for design {shipDesignToBuy}. (NotImplemented)");
             throw new NotImplementedException("Escadre.RequestBuyShip");
         }
 
@@ -184,19 +198,21 @@ namespace Core.Model
                 Logger.LogWarning($"[Escadre {OwnerClientId}] Attempted to upgrade ship {shipId} not in escadre.");
                 return;
             }
+
             if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
             {
-                // TODO: Check resources, upgrade paths, etc.
-                // Example:
-                // int upgradeCost = GetUpgradeCost(ship.EntityType); // You'd need a way to get cost
-                // if (Resources >= upgradeCost) {
-                //    Resources -= upgradeCost;
-                //    Logger.Log($"[Escadre {OwnerClientId}] Requesting upgrade for Ship {shipId}. Deducted {upgradeCost} resources.");
-                //    ship.PerformUpgrade();
-                // } else {
-                //    Logger.LogWarning($"[Escadre {OwnerClientId}] Not enough resources to upgrade Ship {shipId}.");
-                // }
-                ship.PerformUpgrade(); // Ship handles its own upgrade logic
+                int upgradeCost = GetUpgradeCostForShip(ship); // Get cost based on ship or upgrade type
+
+                if (_resources >= upgradeCost)
+                {
+                    _resources -= upgradeCost; // Deduct resources from escadre
+                    Logger.Log($"[Escadre {OwnerClientId}] Upgrading Ship {shipId}. Cost: {upgradeCost}. Remaining Res: {_resources}.");
+                    ship.PerformUpgrade(); // Tell the ship to apply its upgrade
+                }
+                else
+                {
+                    Logger.LogWarning($"[Escadre {OwnerClientId}] Not enough resources to upgrade Ship {shipId}. Need: {upgradeCost}, Have: {_resources}.");
+                }
             }
             else
             {
@@ -211,14 +227,15 @@ namespace Core.Model
             Vector3 sumPositions = Vector3.Zero;
             int aliveShipCount = 0;
 
-            foreach (int shipId in _shipEntityIds)
+            foreach (int shipIdInList in _shipEntityIds) // Use a distinct loop variable name
             {
-                if (_level.TryGetEntity(shipId, out Entity entity) && !entity.IsDead)
+                if (_level.TryGetEntity(shipIdInList, out Entity entityInLevel) && !entityInLevel.IsDead) // Use a distinct loop variable name
                 {
-                    sumPositions += entity.Position;
+                    sumPositions += entityInLevel.Position;
                     aliveShipCount++;
                 }
             }
+
             return aliveShipCount > 0 ? sumPositions / aliveShipCount : Vector3.Zero;
         }
 
@@ -226,11 +243,11 @@ namespace Core.Model
         {
              Logger.Log($"[Escadre {OwnerClientId}] Disbanding (silent: {silentKill}). Killing all ships.");
              var idsToKill = new List<int>(_shipEntityIds);
-             foreach (int shipId in idsToKill)
+             foreach (int shipIdInList in idsToKill) // Use a distinct loop variable name
              {
-                 if (_level.TryGetEntity(shipId, out Entity entity) && !entity.IsDead)
+                 if (_level.TryGetEntity(shipIdInList, out Entity entityInLevel) && !entityInLevel.IsDead) // Use a distinct loop variable name
                  {
-                     entity.Kill(silentKill);
+                     entityInLevel.Kill(silentKill);
                  }
              }
              _shipEntityIds.Clear();
