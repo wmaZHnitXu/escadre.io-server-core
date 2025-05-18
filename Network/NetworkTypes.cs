@@ -2,8 +2,8 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
-using Core.Model;
-using Core.Primitives;
+using Core.Model; // For EntityTypeEnum
+using Core.Primitives; // For Vector3, Quaternion
 
 namespace Core.Network
 {
@@ -11,10 +11,10 @@ namespace Core.Network
     {
         // S->C Lifecycle & State
         CreateEntity = 1,
-        DestroyEntity = 2,  // Now specifically means "Loud Destruction, play effects"
+        DestroyEntity = 2,  // Means "Loud Destruction, play effects"
         VanishEntity = 3,   // Means "Entity removed from PVS or silently destroyed, cleanup proxy"
         UpdateState = 4,
-        EntityEvent = 5,    // Note: Shifted EntityEvent down due to VanishEntity insertion
+        EntityEvent = 5,
 
         // C->S State Sync & View Updates
         _ClientSyncState = 6,
@@ -27,18 +27,42 @@ namespace Core.Network
         _UpgradeShip = 13,
         _BuyShip = 14,
     }
+
     public interface IClientProxy
     {
         int EntityId { get; }
         Entity.EntityTypeEnum EntityType { get; }
-        void HandleNetworkMessage(MessageType messageType, BinaryReader reader);
-        void NotifyDestroyed(); // Called when VanishEntity is received
         Vector3 Position { get; }
         Quaternion Rotation { get; }
-        event Action OnDestroyed; // For final cleanup
-        event Action OnLoudDestructionSignaled; // For effects
+
+        void HandleNetworkMessage(MessageType messageType, BinaryReader reader);
+        void NotifyDestroyed(); // Called when VanishEntity is received
+
+        /// <summary>
+        /// Invoked when the proxy is fully destroyed and should be cleaned up
+        /// (typically after receiving a VanishEntity message).
+        /// </summary>
+        event Action OnDestroyed;
+
+        /// <summary>
+        /// Invoked when a "Loud Destruction" signal (DestroyEntity message) is received from the server,
+        /// signaling that destruction effects should be played.
+        /// </summary>
+        event Action OnLoudDestructionSignaled; // <<< THIS WAS MISSING
+
+        /// <summary>
+        /// Invoked when the proxy's position changes.
+        /// </summary>
+        event Action<Vector3> PositionChanged; // Added for completeness and explicit contract
+
+        /// <summary>
+        /// Invoked when the proxy's rotation changes.
+        /// </summary>
+        event Action<Quaternion> RotationChanged; // Added for completeness and explicit contract
     }
 
+
+    // --- IServerProxy Interface ---
     public interface IServerProxy
     {
         int EntityId { get; }
@@ -51,16 +75,15 @@ namespace Core.Network
         bool CheckClientSyncState(BinaryReader reader);
         void SerializeSpecificInitialState(BinaryWriter writer);
         void SerializeCorrectionState(BinaryWriter writer);
-
-        /// <summary> Sends Vanish command to specified clients for proxy cleanup. </summary>
-        void SendVanishMessage(IEnumerable<int> targetClientIds); // Renamed
+        void SendVanishMessage(IEnumerable<int> targetClientIds);
     }
 
+    // --- Network Layer Interfaces ---
     public interface IServerNetworkLayer
     {
         void BroadcastRelevant(int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
         void SendToClient(int clientId, int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
-        void SendVanishCommand(int entityId, IEnumerable<int> targetClientIds); // Added
+        void SendVanishCommand(int entityId, IEnumerable<int> targetClientIds);
         event Action<int, int, MessageType, BinaryReader> OnClientMessageReceived;
     }
     public interface IClientNetworkLayer
