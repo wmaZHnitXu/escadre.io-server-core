@@ -4,7 +4,7 @@ using System.IO;
 using System.Collections.Generic;
 using Core.Model;
 using Core.Primitives;
-using Core.Client; // For ClientLevel reference in IClientProxy constructor (conceptually)
+using Core.Client; 
 
 namespace Core.Network
 {
@@ -12,10 +12,10 @@ namespace Core.Network
     {
         // S->C Lifecycle & State
         CreateEntity = 1,
-        DestroyEntity = 2,          // Loud Destruction signal
-        VanishEntity = 3,           // Silent Removal / PVS exit signal
-        UpdateState = 4,            // Full authoritative state correction from server
-        EntityEvent = 5,            // For specific gameplay events (e.g., TookDamageVisual, SetMovementTarget)
+        DestroyEntity = 2,          
+        VanishEntity = 3,           
+        UpdateState = 4,            
+        EntityEvent = 5,            
 
         // C->S State Sync & View Updates
         _ClientSyncState = 10,
@@ -27,6 +27,13 @@ namespace Core.Network
         _CancelAttack = 22,
         _UpgradeShip = 23,
         _BuyShip = 24,
+
+        // C->S Session Management
+        _ClientConnectRequest = 30,
+        // _ClientDisconnect = 31, // Future consideration
+
+        // S->C Session Management
+        // _ClientConnectResponse = 40, // Optional: For now, successful connection implies server starts sending data
     }
 
     public interface IClientProxy
@@ -35,11 +42,10 @@ namespace Core.Network
         Entity.EntityTypeEnum EntityType { get; }
         Vector3 Position { get; }
         Quaternion Rotation { get; }
-        ClientLevel OwningClientLevel { get; } // Added to access time or other level context
+        ClientLevel OwningClientLevel { get; } 
 
         void HandleNetworkMessage(MessageType messageType, BinaryReader reader);
         void NotifyDestroyed();
-        // Update signature changed: no longer takes clientSimulatedServerTime
         void Update(float deltaTime); 
 
         event Action OnDestroyed;
@@ -67,11 +73,13 @@ namespace Core.Network
         void BroadcastRelevant(int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
         void SendToClient(int clientId, int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
         void SendVanishCommand(int entityId, IEnumerable<int> targetClientIds);
-        event Action<int, int, MessageType, BinaryReader> OnClientMessageReceived;
+        // Parameters: sendingClientId, entityId (context, 0 for global commands like connect), messageType, payloadReader
+        event Action<int /*sendingClientId*/, int /*entityId*/, MessageType, BinaryReader> OnClientMessageReceived;
     }
 
     public interface IClientNetworkLayer
     {
+        // Parameters: entityId (context, 0 for global commands like connect), messageType, payloadAction
         void SendToServer(int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
         event Action<int, MessageType, BinaryReader> OnMessageReceived;
     }
