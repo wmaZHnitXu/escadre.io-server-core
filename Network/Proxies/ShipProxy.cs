@@ -2,178 +2,219 @@
 using System;
 using System.IO;
 using Core.Model;
-using Core.Network; // For IServerNetworkLayer
+using Core.Network;
 using Core.Logging;
-using Core.Primitives; // For Vector types if needed for specific state
+using Core.Primitives;
 
 namespace Core.Network.Proxies
 {
     public static class ShipProxy
     {
-        // No ship-specific events defined yet beyond what DestructibleEntityProxy handles
-        // protected enum ShipEventType : byte {}
+        internal enum ShipEventType : byte
+        {
+            SetMovementTarget = 1,
+        }
 
-        // --- Server Proxy Implementation ---
-        // Inherits from DestructibleEntityProxy.ServerProxy, typed with Ship
         public class ServerProxy : DestructibleEntityProxy.ServerProxy<Ship>
         {
             public ServerProxy(Ship entity, IServerNetworkLayer networkLayer)
                 : base(entity, networkLayer) { }
 
-            protected override float CalculateChecksum()
-            {
-                // Combine DestructibleEntity checksum (Pos, Rot, Health) with Ship-specific state
+            protected override float CalculateChecksum() {
                 int baseHash = base.CalculateChecksum().GetHashCode();
-                return HashCode.Combine(
-                    baseHash,
-                    _entity.CurrentSpeed.GetHashCode(),
-                    _entity.MaxSpeed.GetHashCode(), // If these stats can change (e.g. upgrades) and need checksumming
-                    _entity.AttackRange.GetHashCode()
-                    // Add other relevant stats if they are dynamic and checksummed
-                );
+                return HashCode.Combine(baseHash, _entity.CurrentSpeed.GetHashCode(), _entity.MaxSpeed.GetHashCode(), _entity.AttackRange.GetHashCode());
             }
-
-            public override void SerializeSpecificInitialState(BinaryWriter writer)
-            {
-                base.SerializeSpecificInitialState(writer); // Writes CurrentHealth, MaxHealth
-
-                // Ship-specific initial state
+            public override void SerializeSpecificInitialState(BinaryWriter writer) {
+                base.SerializeSpecificInitialState(writer);
                 writer.Write(_entity.OwningEscadreClientId);
-                writer.Write(_entity.CurrentSpeed); // Initial speed might be 0
-
-                // Write ship stats (these are abstract, so concrete ship provides them)
-                writer.Write(_entity.MaxSpeed);
-                writer.Write(_entity.TurnRate);
-                writer.Write(_entity.AttackDamage);
-                writer.Write(_entity.AttackRange);
-                writer.Write(_entity.AttackCooldown);
-            }
-
-            protected override void SerializeSpecificCorrectionState(BinaryWriter writer)
-            {
-                base.SerializeSpecificCorrectionState(writer); // Writes CurrentHealth, MaxHealth
-
-                // Ship-specific correction state
                 writer.Write(_entity.CurrentSpeed);
-
-                // If stats like MaxSpeed, AttackDamage can change frequently outside of major "Upgrade" events,
-                // they should be synced here. Otherwise, an "Upgraded" event might trigger a full resync
-                // or send the new stat block. For simplicity, syncing them here if they might change.
-                writer.Write(_entity.MaxSpeed);
-                writer.Write(_entity.TurnRate);
-                writer.Write(_entity.AttackDamage);
-                writer.Write(_entity.AttackRange);
-                writer.Write(_entity.AttackCooldown);
+                writer.Write(_entity.MaxSpeed); writer.Write(_entity.TurnRate); writer.Write(_entity.AttackDamage);
+                writer.Write(_entity.AttackRange); writer.Write(_entity.AttackCooldown);
+            }
+            protected override void SerializeSpecificCorrectionState(BinaryWriter writer) {
+                base.SerializeSpecificCorrectionState(writer);
+                writer.Write(_entity.CurrentSpeed); // Server's current actual speed
+                writer.Write(_entity.MaxSpeed); writer.Write(_entity.TurnRate); writer.Write(_entity.AttackDamage);
+                writer.Write(_entity.AttackRange); writer.Write(_entity.AttackCooldown);
             }
 
-            protected override void StartReplicatingInternal()
-            {
-                base.StartReplicatingInternal(); // Subscribes to OnDamaged from DestructibleEntityProxy
-                // Subscribe to any Ship-specific events here
-                // e.g., _entity.OnWeaponFired += HandleWeaponFired;
-                Logger.Log($"[ShipProxy.Server {EntityId}] Subscribed to specific Ship events (if any).");
+            protected override void StartReplicatingInternal() {
+                base.StartReplicatingInternal();
+                if (_entity != null) {
+                    _entity.OnMovementTargetProgrammed += HandleModelMovementTargetProgrammed;
+                }
             }
-
-            protected override void StopReplicatingInternal()
-            {
+            protected override void StopReplicatingInternal() {
                 base.StopReplicatingInternal();
-                // Unsubscribe from Ship-specific events
-                Logger.Log($"[ShipProxy.Server {EntityId}] Unsubscribed from specific Ship events (if any).");
+                if (_entity != null) {
+                    _entity.OnMovementTargetProgrammed -= HandleModelMovementTargetProgrammed;
+                }
+            }
+
+            private void HandleModelMovementTargetProgrammed(Ship ship, Vector2? newTarget, float serverTime) {
+                if (ship.Id != _entity.Id) return;
+                SendEvent((byte)ShipEventType.SetMovementTarget, writer => {
+                    bool hasTarget = newTarget.HasValue;
+                    writer.Write(hasTarget);
+                    if (hasTarget) {
+                        SerializationUtils.WriteVector2(writer, newTarget.Value);
+                    }
+                    SerializationUtils.WriteVector3(writer, _entity.Position);
+                    SerializationUtils.WriteQuaternion(writer, _entity.Rotation);
+                    writer.Write(serverTime);
+                });
             }
         }
 
-        // --- Client Proxy Implementation ---
-        // Inherits from DestructibleEntityProxy.ClientProxy
         public class ClientProxy : DestructibleEntityProxy.ClientProxy
         {
             public int OwningEscadreClientId { get; private set; }
-            public float CurrentSpeed { get; private set; }
-
-            // Stats (mirrored from server)
-            public float MaxSpeed { get; private set; }
-            public float TurnRate { get; private set; }
-            public float AttackDamage { get; private set; }
-            public float AttackRange { get; private set; }
-            public float AttackCooldown { get; private set; }
-
+            private float _clientSimulatedSpeed; // Internal state for simulation
+            public float ClientSimulatedSpeed => _clientSimulatedSpeed; // Read-only public accessor
             public event Action<float> CurrentSpeedChanged;
-            public event Action StatsChanged; // Generic event if multiple stats change (e.g., after an upgrade)
 
-            // EntityType is handled by the base DestructibleEntityProxy.ClientProxy,
-            // which gets the concrete type from the factory.
+            public float MaxSpeed { get; private set; } public float TurnRate { get; private set; }
+            public float AttackDamage { get; private set; } public float AttackRange { get; private set; }
+            public float AttackCooldown { get; private set; }
+            public event Action StatsChanged;
+
+            private Vector2? _currentMovementTarget;
+            // No need for _serverAuthPositionAtCommand, _serverAuthRotationAtCommand, _serverTimeAtCommand here
+            // as the HandleSetMovementTargetCommandPayload will directly snap the _simulatedPosition/_simulatedRotation
+
+            private bool _isMovingClientSide = false; // Flag to indicate if client is simulating movement
 
             public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType)
                 : base(entityId, concreteType) { }
 
-
-            protected override void DeserializeSpecificInitialState(BinaryReader reader)
-            {
-                base.DeserializeSpecificInitialState(reader); // Reads CurrentHealth, MaxHealth
-
+            protected override void DeserializeSpecificInitialState(BinaryReader reader) {
+                base.DeserializeSpecificInitialState(reader); // Handles _simulatedPosition/Rotation from base
                 OwningEscadreClientId = reader.ReadInt32();
-                CurrentSpeed = reader.ReadSingle();
-
-                MaxSpeed = reader.ReadSingle();
-                TurnRate = reader.ReadSingle();
-                AttackDamage = reader.ReadSingle();
-                AttackRange = reader.ReadSingle();
+                _clientSimulatedSpeed = reader.ReadSingle(); // Server sends initial speed
+                MaxSpeed = reader.ReadSingle(); TurnRate = reader.ReadSingle();
+                AttackDamage = reader.ReadSingle(); AttackRange = reader.ReadSingle();
                 AttackCooldown = reader.ReadSingle();
 
-                // Initial invocation of change events
-                CurrentSpeedChanged?.Invoke(CurrentSpeed);
+                CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed); // Invoke after setting
                 StatsChanged?.Invoke();
             }
 
-            protected override void DeserializeSpecificState(BinaryReader reader)
-            {
-                base.DeserializeSpecificState(reader); // Reads CurrentHealth, MaxHealth
-
-                var oldSpeed = CurrentSpeed;
-                CurrentSpeed = reader.ReadSingle();
+            protected override void DeserializeSpecificState(BinaryReader reader) { // For MessageType.UpdateState
+                base.DeserializeSpecificState(reader); // Snaps _simulatedPosition/_simulatedRotation via base, handles Health
+                
+                float serverAuthoritativeSpeed = reader.ReadSingle(); // Server's current speed
+                // We don't directly set _clientSimulatedSpeed to serverAuthoritativeSpeed here,
+                // because _clientSimulatedSpeed is a result of *our* simulation.
+                // However, if our simulation is off, this UpdateState (which includes pos/rot snap)
+                // effectively corrects us. If the ship *should* be stopped due to server logic,
+                // the server might also send a SetMovementTarget event with no target.
 
                 var oldMaxSpeed = MaxSpeed;
-                MaxSpeed = reader.ReadSingle();
-                TurnRate = reader.ReadSingle(); // Assuming TurnRate is also synced if it can change
-                AttackDamage = reader.ReadSingle();
-                AttackRange = reader.ReadSingle();
+                MaxSpeed = reader.ReadSingle(); TurnRate = reader.ReadSingle();
+                AttackDamage = reader.ReadSingle(); AttackRange = reader.ReadSingle();
                 AttackCooldown = reader.ReadSingle();
-
-
-                if (Math.Abs(CurrentSpeed - oldSpeed) > float.Epsilon)
-                {
-                    CurrentSpeedChanged?.Invoke(CurrentSpeed);
-                }
-
-                // Check if any stat changed significantly to raise a general StatsChanged event
-                if (Math.Abs(MaxSpeed - oldMaxSpeed) > float.Epsilon || /* other stat comparisons */ true) // Simplification for now
-                {
-                     StatsChanged?.Invoke();
+                if (Math.Abs(MaxSpeed - oldMaxSpeed) > float.Epsilon /* || other stats */) {
+                    StatsChanged?.Invoke();
                 }
             }
 
             protected override void HandleSpecificEvent(byte specificEventType, BinaryReader reader)
             {
-                // If Ship had its own event types, handle them here.
-                // For now, it relies on DestructibleEntityProxy for TookDamageVisual.
-                // Cast specificEventType to ShipEventType if defined.
-                // switch ((ShipEventType)specificEventType) { ... }
-                base.HandleSpecificEvent(specificEventType, reader); // Pass to base if not a ship-specific event
-                                                                     // Or, if no ship-specific events, this method can be removed
-                                                                     // and base class handles all events.
-                                                                     // For now, explicitly call base to ensure Destructible events are processed.
+                if (Enum.IsDefined(typeof(ShipEventType), specificEventType))
+                {
+                    ShipEventType eventType = (ShipEventType)specificEventType;
+                    switch (eventType)
+                    {
+                        case ShipEventType.SetMovementTarget:
+                            HandleSetMovementTargetEventPayload(reader);
+                            break;
+                        default:
+                            Logger.LogWarning($"[ShipProxy.Client {EntityId}] Received unhandled ShipEventType: {eventType}");
+                            break;
+                    }
+                }
+                else {
+                    base.HandleSpecificEvent(specificEventType, reader); // Pass to DestructibleEntityProxy for its events
+                }
             }
 
-            protected override void InvokeSpecificStateChangedEvents()
+            private void HandleSetMovementTargetEventPayload(BinaryReader reader)
             {
-                base.InvokeSpecificStateChangedEvents(); // Handles HealthChanged from DestructibleEntityProxy
-                // CurrentSpeedChanged and StatsChanged are invoked directly in DeserializeSpecificState
+                bool hasTarget = reader.ReadBoolean();
+                _currentMovementTarget = hasTarget ? SerializationUtils.ReadVector2(reader) : (Vector2?)null;
+                
+                // Snap to server's provided state AT THE TIME OF THE COMMAND
+                Vector3 serverPosAtCommand = SerializationUtils.ReadVector3(reader);
+                Quaternion serverRotAtCommand = SerializationUtils.ReadQuaternion(reader);
+                float serverTimeOfCommand = reader.ReadSingle(); // Store if needed for advanced prediction logic
+
+                SetSimulatedPositionAndRotation(serverPosAtCommand, serverRotAtCommand); // Snap and invoke events
+                
+                _isMovingClientSide = hasTarget;
+
+                if (!_isMovingClientSide) { // If command is to stop
+                    if (Math.Abs(_clientSimulatedSpeed) > float.Epsilon) {
+                        _clientSimulatedSpeed = 0f; CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
+                    }
+                }
+                // Logger.Log($"[ShipProxy.Client {EntityId}] Rcvd SetMovementTarget Event. Target: {_currentMovementTarget?.ToString() ?? "None"}. Snapped to server state: Pos={serverPosAtCommand}, Rot={serverRotAtCommand} @ ServerTime={serverTimeOfCommand}");
             }
 
-            protected override void CleanupEvents()
+            public override void Update(float clientSimulatedServerTime, float deltaTime)
             {
-                base.CleanupEvents();
-                CurrentSpeedChanged = null;
-                StatsChanged = null;
+                // This method is called by ClientLevel.DoUpdate()
+                base.Update(clientSimulatedServerTime, deltaTime); // Base currently does nothing
+                if (deltaTime <= 0f || !_isMovingClientSide || !_currentMovementTarget.HasValue)
+                {
+                    // If not supposed to be moving client-side, ensure speed reflects that
+                    if (Math.Abs(_clientSimulatedSpeed) > float.Epsilon && !_isMovingClientSide)
+                    {
+                        _clientSimulatedSpeed = 0f;
+                        CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
+                    }
+                    return;
+                }
+
+                // --- Client-Side Movement Simulation ---
+                Vector3 currentSimPos = _simulatedPosition; // Use local copies for calculation
+                Quaternion currentSimRot = _simulatedRotation;
+                float currentSimSpeed = _clientSimulatedSpeed;
+
+                Vector2 currentPos2D = new Vector2(currentSimPos.X, currentSimPos.Z);
+                Vector2 targetPos2D = _currentMovementTarget.Value;
+                Vector2 toTarget = targetPos2D - currentPos2D;
+
+                if (toTarget.SqrMagnitude < 0.01f * 0.01f) { // Close enough to target
+                    currentSimPos = new Vector3(targetPos2D.X, currentSimPos.Y, targetPos2D.Y);
+                    _isMovingClientSide = false;
+                    _currentMovementTarget = null;
+                    currentSimSpeed = 0f;
+                } else {
+                    currentSimSpeed = this.MaxSpeed;
+                    Vector2 directionToTarget = toTarget.Normalized;
+                    Vector3 targetForward = new Vector3(directionToTarget.X, 0, directionToTarget.Y);
+
+                    if (targetForward.SqrMagnitude > Vector3.Epsilon) {
+                        Quaternion desiredRotation = Quaternion.LookRotation(targetForward, Vector3.Up);
+                        currentSimRot = Quaternion.RotateTowards(currentSimRot, desiredRotation, this.TurnRate * deltaTime);
+                    }
+                    Vector3 velocity = currentSimRot * Vector3.Forward * currentSimSpeed * deltaTime;
+                    currentSimPos += velocity;
+                }
+
+                // Update the authoritative simulated state and invoke events if changed
+                SetSimulatedPositionAndRotation(currentSimPos, currentSimRot);
+                if (Math.Abs(_clientSimulatedSpeed - currentSimSpeed) > float.Epsilon) {
+                    _clientSimulatedSpeed = currentSimSpeed;
+                    CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
+                }
+            }
+
+            protected override void CleanupEvents() {
+                base.CleanupEvents(); CurrentSpeedChanged = null; StatsChanged = null;
+            }
+            protected override void InvokeSpecificStateChangedEvents() { // Called by base after UpdateState
+                base.InvokeSpecificStateChangedEvents();
             }
         }
     }
