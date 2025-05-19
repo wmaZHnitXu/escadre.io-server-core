@@ -1,10 +1,11 @@
-// File: Scripts/Server/Core/Network/Proxies/DebugEntityProxy.cs
+// File: Core/Network/Proxies/DebugEntityProxy.cs
 using System;
 using System.IO;
 using Core.Model;
 using Core.Primitives;
 using Core.Network;
 using Core.Logging;
+using Core.Client; // For ClientLevel
 
 namespace Core.Network.Proxies
 {
@@ -17,7 +18,6 @@ namespace Core.Network.Proxies
             ShoutAt = 3,
         }
 
-        // --- Server Proxy Implementation ---
         public class ServerProxy : BaseServerProxy<DebugEntity>
         {
             public ServerProxy(DebugEntity entity, IServerNetworkLayer networkLayer)
@@ -67,7 +67,6 @@ namespace Core.Network.Proxies
             private void HandleShoutAt(Entity targetEntity) { SendEvent((byte)DebugEventType.ShoutAt, writer => writer.Write(targetEntity.Id)); }
         }
 
-        // --- Client Proxy Implementation ---
         public class ClientProxy : BaseClientProxy
         {
             private float _hydration;
@@ -78,14 +77,17 @@ namespace Core.Network.Proxies
 
             public event Action<Vector3> OnSetRestPositionEvent;
             public event Action<Vector3> OnSpitAtEvent;
-            public event Action<int> OnShoutAtEventId; // Pass ID
+            public event Action<int> OnShoutAtEventId; 
 
             public event Action<float> HydrationChanged;
             public event Action<float> GuiltChanged;
 
             public override Entity.EntityTypeEnum EntityType => Entity.EntityTypeEnum.Debug;
 
-            public ClientProxy(int entityId) : base(entityId) { }
+            // Constructor updated to take ClientLevel
+            public ClientProxy(int entityId, ClientLevel clientLevel) 
+                : base(entityId, clientLevel) // Pass clientLevel to base
+            { }
 
             protected override void DeserializeSpecificInitialState(BinaryReader reader)
             {
@@ -107,33 +109,38 @@ namespace Core.Network.Proxies
 
             protected override void InvokeSpecificStateChangedEvents()
             {
-                // This method is now less critical if specific change events are invoked directly in DeserializeSpecificState
-                // However, can be used for compound state change notifications or if specific events are not used above.
             }
 
             protected override void HandleSpecificEvent(byte specificEventType, BinaryReader reader)
             {
-                DebugEventType eventType = (DebugEventType)specificEventType;
-                switch (eventType)
+                if (Enum.IsDefined(typeof(DebugEventType), specificEventType))
                 {
-                    case DebugEventType.SetRestPosition:
-                        Vector3 pos = SerializationUtils.ReadVector3(reader);
-                        OnSetRestPositionEvent?.Invoke(pos);
-                        Logger.Log($"[DebugEntityProxy.Client {EntityId}] Event: SetRestPosition to {pos}");
-                        break;
-                    case DebugEventType.SpitAt:
-                        Vector3 targetPos = SerializationUtils.ReadVector3(reader);
-                        OnSpitAtEvent?.Invoke(targetPos);
-                        Logger.Log($"[DebugEntityProxy.Client {EntityId}] Event: SpitAt {targetPos}");
-                        break;
-                    case DebugEventType.ShoutAt:
-                        int targetId = reader.ReadInt32();
-                        OnShoutAtEventId?.Invoke(targetId);
-                        Logger.Log($"[DebugEntityProxy.Client {EntityId}] Event: ShoutAt TargetId {targetId}");
-                        break;
-                    default:
-                        Logger.LogWarning($"[DebugEntityProxy.Client {EntityId}] Received unknown specific event type: {specificEventType}");
-                        break;
+                    DebugEventType eventType = (DebugEventType)specificEventType;
+                    switch (eventType)
+                    {
+                        case DebugEventType.SetRestPosition:
+                            Vector3 pos = SerializationUtils.ReadVector3(reader);
+                            OnSetRestPositionEvent?.Invoke(pos);
+                            Logger.Log($"[DebugEntityProxy.Client {EntityId}] Event: SetRestPosition to {pos}");
+                            break;
+                        case DebugEventType.SpitAt:
+                            Vector3 targetPos = SerializationUtils.ReadVector3(reader);
+                            OnSpitAtEvent?.Invoke(targetPos);
+                            Logger.Log($"[DebugEntityProxy.Client {EntityId}] Event: SpitAt {targetPos}");
+                            break;
+                        case DebugEventType.ShoutAt:
+                            int targetId = reader.ReadInt32();
+                            OnShoutAtEventId?.Invoke(targetId);
+                            Logger.Log($"[DebugEntityProxy.Client {EntityId}] Event: ShoutAt TargetId {targetId}");
+                            break;
+                        default:
+                            Logger.LogWarning($"[DebugEntityProxy.Client {EntityId}] Received unknown DebugEventType: {eventType}");
+                            break;
+                    }
+                }
+                else
+                {
+                    Logger.LogWarning($"[DebugEntityProxy.Client {EntityId}] Received unhandled specific event type byte: {specificEventType}. This proxy does not call base.HandleSpecificEvent.");
                 }
             }
 

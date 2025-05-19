@@ -4,6 +4,7 @@ using System.IO;
 using System.Collections.Generic;
 using Core.Model;
 using Core.Primitives;
+using Core.Client; // For ClientLevel reference in IClientProxy constructor (conceptually)
 
 namespace Core.Network
 {
@@ -34,10 +35,12 @@ namespace Core.Network
         Entity.EntityTypeEnum EntityType { get; }
         Vector3 Position { get; }
         Quaternion Rotation { get; }
+        ClientLevel OwningClientLevel { get; } // Added to access time or other level context
 
         void HandleNetworkMessage(MessageType messageType, BinaryReader reader);
         void NotifyDestroyed();
-        void Update(float clientSimulatedServerTime, float deltaTime);
+        // Update signature changed: no longer takes clientSimulatedServerTime
+        void Update(float deltaTime); 
 
         event Action OnDestroyed;
         event Action OnLoudDestructionSignaled;

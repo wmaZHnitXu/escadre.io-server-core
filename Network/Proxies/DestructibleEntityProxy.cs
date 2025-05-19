@@ -4,6 +4,7 @@ using System.IO;
 using Core.Model;
 using Core.Network;
 using Core.Logging;
+using Core.Client; // For ClientLevel
 
 namespace Core.Network.Proxies
 {
@@ -11,12 +12,9 @@ namespace Core.Network.Proxies
     {
         protected enum DestructibleEventType : byte
         {
-            TookDamageVisual = 1, // For visual/audio effects, includes DamageInfo
-            // HealthChanged event is implicitly handled by state sync (CurrentHealth)
+            TookDamageVisual = 1, 
         }
 
-        // --- Server Proxy Implementation ---
-        // Generic constraint to allow ShipProxy to inherit with Ship type
         public class ServerProxy<TDestructible> : BaseServerProxy<TDestructible>
             where TDestructible : DestructibleEntity
         {
@@ -25,12 +23,11 @@ namespace Core.Network.Proxies
 
             protected override float CalculateChecksum()
             {
-                // Combine base checksum (Position, Rotation) with DestructibleEntity state
-                int baseHash = base.CalculateChecksum().GetHashCode(); // Get hash from float for combining
+                int baseHash = base.CalculateChecksum().GetHashCode(); 
                 return HashCode.Combine(
                     baseHash,
                     _entity.CurrentHealth.GetHashCode(),
-                    _entity.MaxHealth.GetHashCode() // MaxHealth might change due to upgrades
+                    _entity.MaxHealth.GetHashCode() 
                 );
             }
 
@@ -62,9 +59,8 @@ namespace Core.Network.Proxies
 
             private void HandleEntityDamaged(DamageInfo damageInfo, DestructibleEntity victim)
             {
-                if (victim.Id != _entity.Id) return; // Should not happen if subscribed correctly
+                if (victim.Id != _entity.Id) return; 
 
-                // Send an event for visual/audio cues on the client
                 SendEvent((byte)DestructibleEventType.TookDamageVisual, writer =>
                 {
                     SerializationUtils.WriteDamageInfo(writer, damageInfo);
@@ -73,29 +69,32 @@ namespace Core.Network.Proxies
             }
         }
 
-        // --- Client Proxy Implementation ---
         public class ClientProxy : BaseClientProxy
         {
             public float CurrentHealth { get; protected set; }
             public float MaxHealth { get; protected set; }
 
-            public event Action<float, float> HealthChanged; // current, max
-            public event Action<DamageInfo> TookDamageVisuals; // For effects
+            public event Action<float, float> HealthChanged; 
+            public event Action<DamageInfo> TookDamageVisuals; 
 
-            // EntityType will be set by the concrete proxy that might inherit from this (e.g. ShipProxy)
-            // Or, if this proxy is used directly, the factory needs to set it.
-            // For now, assume a derived proxy or factory sets EntityType.
             private Entity.EntityTypeEnum _concreteEntityType;
             public override Entity.EntityTypeEnum EntityType => _concreteEntityType;
 
-            public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType) : base(entityId)
+            // Constructor updated to take ClientLevel
+            public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType, ClientLevel clientLevel) 
+                : base(entityId, clientLevel) // Pass clientLevel to base
             {
                 _concreteEntityType = concreteType;
             }
-             // Constructor for direct use if not inherited, though less likely
-            public ClientProxy(int entityId) : base(entityId)
+            
+            // This constructor might be problematic if not all paths provide ClientLevel.
+            // It's better to ensure ClientLevel is always passed.
+            // For now, keeping it but it should ideally be removed or handled carefully.
+            public ClientProxy(int entityId, ClientLevel clientLevel) 
+                : base(entityId, clientLevel) // Pass clientLevel to base
             {
                  Logger.LogWarning($"[DestructibleEntityProxy.Client {EntityId}] Created without concrete type. EntityType will be default.");
+                 // _concreteEntityType would be default(Entity.EntityTypeEnum) which is Debug. This might be an issue.
             }
 
 
@@ -103,7 +102,7 @@ namespace Core.Network.Proxies
             {
                 CurrentHealth = reader.ReadSingle();
                 MaxHealth = reader.ReadSingle();
-                HealthChanged?.Invoke(CurrentHealth, MaxHealth); // Invoke on initial set
+                HealthChanged?.Invoke(CurrentHealth, MaxHealth); 
             }
 
             protected override void DeserializeSpecificState(BinaryReader reader)
@@ -122,22 +121,31 @@ namespace Core.Network.Proxies
 
             protected override void InvokeSpecificStateChangedEvents()
             {
-                // HealthChanged is invoked directly in DeserializeSpecificState
             }
 
             protected override void HandleSpecificEvent(byte specificEventType, BinaryReader reader)
             {
-                DestructibleEventType eventType = (DestructibleEventType)specificEventType;
-                switch (eventType)
+                if (Enum.IsDefined(typeof(DestructibleEventType), specificEventType))
                 {
-                    case DestructibleEventType.TookDamageVisual:
-                        DamageInfo dInfo = SerializationUtils.ReadDamageInfo(reader);
-                        TookDamageVisuals?.Invoke(dInfo);
-                        Logger.Log($"[DestructibleEntityProxy.Client {EntityId}] Event: TookDamageVisual. Damage: {dInfo.Amount}");
-                        break;
-                    default:
-                        Logger.LogWarning($"[DestructibleEntityProxy.Client {EntityId}] Received unknown specific event type: {specificEventType}");
-                        break;
+                    DestructibleEventType eventType = (DestructibleEventType)specificEventType;
+                    switch (eventType)
+                    {
+                        case DestructibleEventType.TookDamageVisual:
+                            DamageInfo dInfo = SerializationUtils.ReadDamageInfo(reader);
+                            TookDamageVisuals?.Invoke(dInfo);
+                            Logger.Log($"[DestructibleEntityProxy.Client {EntityId}] Event: TookDamageVisual. Damage: {dInfo.Amount}");
+                            break;
+                        default:
+                            Logger.LogWarning($"[DestructibleEntityProxy.Client {EntityId}] Received unknown DestructibleEventType: {eventType}");
+                            break;
+                    }
+                }
+                else
+                {
+                     Logger.LogWarning($"[DestructibleEntityProxy.Client {EntityId}] Received unhandled specific event type byte: {specificEventType}. Could be for a derived proxy.");
+                     // It's important that derived proxies (like ShipProxy) call base.HandleSpecificEvent if they don't handle the event themselves.
+                     // However, BaseClientProxy.HandleSpecificEvent is abstract, so this path shouldn't be hit if specificEventType is not a DestructibleEventType.
+                     // This implies an issue if a specificEventType is received here that is not a DestructibleEventType.
                 }
             }
 

@@ -5,6 +5,7 @@ using Core.Model;
 using Core.Network;
 using Core.Logging;
 using Core.Primitives;
+using Core.Client; // For ClientLevel
 
 namespace Core.Network.Proxies
 {
@@ -69,8 +70,8 @@ namespace Core.Network.Proxies
         public class ClientProxy : DestructibleEntityProxy.ClientProxy
         {
             public int OwningEscadreClientId { get; private set; }
-            private float _clientSimulatedSpeed; // Internal state for simulation
-            public float ClientSimulatedSpeed => _clientSimulatedSpeed; // Read-only public accessor
+            private float _clientSimulatedSpeed; 
+            public float ClientSimulatedSpeed => _clientSimulatedSpeed; 
             public event Action<float> CurrentSpeedChanged;
 
             public float MaxSpeed { get; private set; } public float TurnRate { get; private set; }
@@ -79,35 +80,28 @@ namespace Core.Network.Proxies
             public event Action StatsChanged;
 
             private Vector2? _currentMovementTarget;
-            // No need for _serverAuthPositionAtCommand, _serverAuthRotationAtCommand, _serverTimeAtCommand here
-            // as the HandleSetMovementTargetCommandPayload will directly snap the _simulatedPosition/_simulatedRotation
+            private bool _isMovingClientSide = false; 
 
-            private bool _isMovingClientSide = false; // Flag to indicate if client is simulating movement
-
-            public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType)
-                : base(entityId, concreteType) { }
+            // Constructor updated
+            public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType, ClientLevel clientLevel)
+                : base(entityId, concreteType, clientLevel) { }
 
             protected override void DeserializeSpecificInitialState(BinaryReader reader) {
-                base.DeserializeSpecificInitialState(reader); // Handles _simulatedPosition/Rotation from base
+                base.DeserializeSpecificInitialState(reader); 
                 OwningEscadreClientId = reader.ReadInt32();
-                _clientSimulatedSpeed = reader.ReadSingle(); // Server sends initial speed
+                _clientSimulatedSpeed = reader.ReadSingle(); 
                 MaxSpeed = reader.ReadSingle(); TurnRate = reader.ReadSingle();
                 AttackDamage = reader.ReadSingle(); AttackRange = reader.ReadSingle();
                 AttackCooldown = reader.ReadSingle();
 
-                CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed); // Invoke after setting
+                CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed); 
                 StatsChanged?.Invoke();
             }
 
-            protected override void DeserializeSpecificState(BinaryReader reader) { // For MessageType.UpdateState
-                base.DeserializeSpecificState(reader); // Snaps _simulatedPosition/_simulatedRotation via base, handles Health
+            protected override void DeserializeSpecificState(BinaryReader reader) { 
+                base.DeserializeSpecificState(reader); 
                 
-                float serverAuthoritativeSpeed = reader.ReadSingle(); // Server's current speed
-                // We don't directly set _clientSimulatedSpeed to serverAuthoritativeSpeed here,
-                // because _clientSimulatedSpeed is a result of *our* simulation.
-                // However, if our simulation is off, this UpdateState (which includes pos/rot snap)
-                // effectively corrects us. If the ship *should* be stopped due to server logic,
-                // the server might also send a SetMovementTarget event with no target.
+                float serverAuthoritativeSpeed = reader.ReadSingle(); 
 
                 var oldMaxSpeed = MaxSpeed;
                 MaxSpeed = reader.ReadSingle(); TurnRate = reader.ReadSingle();
@@ -134,7 +128,7 @@ namespace Core.Network.Proxies
                     }
                 }
                 else {
-                    base.HandleSpecificEvent(specificEventType, reader); // Pass to DestructibleEntityProxy for its events
+                    base.HandleSpecificEvent(specificEventType, reader); 
                 }
             }
 
@@ -143,30 +137,29 @@ namespace Core.Network.Proxies
                 bool hasTarget = reader.ReadBoolean();
                 _currentMovementTarget = hasTarget ? SerializationUtils.ReadVector2(reader) : (Vector2?)null;
                 
-                // Snap to server's provided state AT THE TIME OF THE COMMAND
                 Vector3 serverPosAtCommand = SerializationUtils.ReadVector3(reader);
                 Quaternion serverRotAtCommand = SerializationUtils.ReadQuaternion(reader);
-                float serverTimeOfCommand = reader.ReadSingle(); // Store if needed for advanced prediction logic
+                float serverTimeOfCommand = reader.ReadSingle(); 
 
-                SetSimulatedPositionAndRotation(serverPosAtCommand, serverRotAtCommand); // Snap and invoke events
+                SetSimulatedPositionAndRotation(serverPosAtCommand, serverRotAtCommand); 
                 
                 _isMovingClientSide = hasTarget;
 
-                if (!_isMovingClientSide) { // If command is to stop
+                if (!_isMovingClientSide) { 
                     if (Math.Abs(_clientSimulatedSpeed) > float.Epsilon) {
                         _clientSimulatedSpeed = 0f; CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
                     }
                 }
-                // Logger.Log($"[ShipProxy.Client {EntityId}] Rcvd SetMovementTarget Event. Target: {_currentMovementTarget?.ToString() ?? "None"}. Snapped to server state: Pos={serverPosAtCommand}, Rot={serverRotAtCommand} @ ServerTime={serverTimeOfCommand}");
+                // Can use OwningClientLevel.CurrentTime here if needed to compare against serverTimeOfCommand for advanced prediction.
+                // Logger.Log($"[ShipProxy.Client {EntityId}] Rcvd SetMovementTarget Event. Target: {_currentMovementTarget?.ToString() ?? "None"}. Snapped to server state: Pos={serverPosAtCommand}, Rot={serverRotAtCommand} @ ServerTime={serverTimeOfCommand}. ClientTime: {OwningClientLevel.CurrentTime}");
             }
 
-            public override void Update(float clientSimulatedServerTime, float deltaTime)
+            // Update signature changed
+            public override void Update(float deltaTime)
             {
-                // This method is called by ClientLevel.DoUpdate()
-                base.Update(clientSimulatedServerTime, deltaTime); // Base currently does nothing
+                base.Update(deltaTime); 
                 if (deltaTime <= 0f || !_isMovingClientSide || !_currentMovementTarget.HasValue)
                 {
-                    // If not supposed to be moving client-side, ensure speed reflects that
                     if (Math.Abs(_clientSimulatedSpeed) > float.Epsilon && !_isMovingClientSide)
                     {
                         _clientSimulatedSpeed = 0f;
@@ -175,8 +168,7 @@ namespace Core.Network.Proxies
                     return;
                 }
 
-                // --- Client-Side Movement Simulation ---
-                Vector3 currentSimPos = _simulatedPosition; // Use local copies for calculation
+                Vector3 currentSimPos = _simulatedPosition; 
                 Quaternion currentSimRot = _simulatedRotation;
                 float currentSimSpeed = _clientSimulatedSpeed;
 
@@ -184,7 +176,7 @@ namespace Core.Network.Proxies
                 Vector2 targetPos2D = _currentMovementTarget.Value;
                 Vector2 toTarget = targetPos2D - currentPos2D;
 
-                if (toTarget.SqrMagnitude < 0.01f * 0.01f) { // Close enough to target
+                if (toTarget.SqrMagnitude < 0.01f * 0.01f) { 
                     currentSimPos = new Vector3(targetPos2D.X, currentSimPos.Y, targetPos2D.Y);
                     _isMovingClientSide = false;
                     _currentMovementTarget = null;
@@ -202,7 +194,6 @@ namespace Core.Network.Proxies
                     currentSimPos += velocity;
                 }
 
-                // Update the authoritative simulated state and invoke events if changed
                 SetSimulatedPositionAndRotation(currentSimPos, currentSimRot);
                 if (Math.Abs(_clientSimulatedSpeed - currentSimSpeed) > float.Epsilon) {
                     _clientSimulatedSpeed = currentSimSpeed;
@@ -213,7 +204,7 @@ namespace Core.Network.Proxies
             protected override void CleanupEvents() {
                 base.CleanupEvents(); CurrentSpeedChanged = null; StatsChanged = null;
             }
-            protected override void InvokeSpecificStateChangedEvents() { // Called by base after UpdateState
+            protected override void InvokeSpecificStateChangedEvents() { 
                 base.InvokeSpecificStateChangedEvents();
             }
         }

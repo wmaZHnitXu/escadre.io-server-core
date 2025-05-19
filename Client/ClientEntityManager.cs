@@ -1,31 +1,42 @@
-// File: Core/Client/ClientEntityManager.cs (Moved from Scripts/Client)
+// File: Core/Client/ClientEntityManager.cs
 using System;
 using System.IO;
 using Core.Network;
 using Core.Network.Proxies;
 using Core.Logging;
 using Core.Model; // For Entity.EntityTypeEnum
+using Core.Time;    // For IClock
 
-namespace Core.Client // Changed namespace
+namespace Core.Client 
 {
-    /// <summary>
-    /// Handles incoming server messages, creates/manages IClientProxy instances
-    /// through a ClientLevel, and routes messages to appropriate proxies.
-    /// This class is NOT a MonoBehaviour.
-    /// </summary>
     public class ClientEntityManager : IDisposable
     {
         private readonly IClientNetworkLayer _networkLayer;
-        private readonly ClientLevel _clientLevel; // Injected dependency
+        private readonly ClientLevel _clientLevel; 
+        private readonly IClock _clock; // Added for creating ClientLevel
 
-        public ClientEntityManager(IClientNetworkLayer networkLayer, ClientLevel clientLevel)
+        // Constructor updated to accept IClock or create a default one
+        public ClientEntityManager(IClientNetworkLayer networkLayer, ClientLevel clientLevel, IClock clock)
         {
             _networkLayer = networkLayer ?? throw new ArgumentNullException(nameof(networkLayer));
-            _clientLevel = clientLevel ?? throw new ArgumentNullException(nameof(clientLevel));
+            _clientLevel = clientLevel ?? throw new ArgumentNullException(nameof(clientLevel)); // ClientLevel is now injected
+            _clock = clock ?? throw new ArgumentNullException(nameof(clock)); // Clock is now injected
 
             _networkLayer.OnMessageReceived += HandleServerMessage;
             Logger.Log("[ClientEntityManager] Initialized and subscribed to network messages.");
         }
+
+        // Overload for convenience if ClientLevel is created internally (less common with DI)
+        public ClientEntityManager(IClientNetworkLayer networkLayer, IClock clock)
+        {
+            _networkLayer = networkLayer ?? throw new ArgumentNullException(nameof(networkLayer));
+            _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+            _clientLevel = new ClientLevel(_clock); // Create ClientLevel internally
+
+            _networkLayer.OnMessageReceived += HandleServerMessage;
+            Logger.Log("[ClientEntityManager] Initialized (created own ClientLevel) and subscribed to network messages.");
+        }
+
 
         private void HandleServerMessage(int entityId, MessageType messageType, BinaryReader reader)
         {
@@ -36,24 +47,21 @@ namespace Core.Client // Changed namespace
                 if (_clientLevel.TryGetProxy(entityId, out IClientProxy oldProxy))
                 {
                     Logger.LogWarning($"[ClientEntityManager] Received CreateEntity for already existing proxy ID: {entityId} (Type: {oldProxy.EntityType}). Will be replaced.");
-                    // The old proxy's OnDestroyed should trigger its removal from ClientLevel via HandleProxyVanished.
-                    // For robustness, ensure it's explicitly removed if it wasn't already.
-                    // However, AddProxy in ClientLevel also handles replacement.
                 }
 
                 try
                 {
                     Entity.EntityTypeEnum entityType = (Entity.EntityTypeEnum)reader.ReadByte();
-                    IClientProxy newProxy = ClientProxyFactory.CreateClientProxy(entityId, entityType, reader); // Initialize is called by factory
+                    // Pass ClientLevel to the factory method
+                    IClientProxy newProxy = ClientProxyFactory.CreateClientProxy(entityId, entityType, _clientLevel, reader); 
 
                     // Subscribe to proxy lifecycle events
                     newProxy.OnLoudDestructionSignaled += () => HandleProxyLoudDestruction(newProxy);
-                    newProxy.OnDestroyed += () => HandleProxyVanished(newProxy); // OnDestroyed is now triggered by VanishEntity
+                    newProxy.OnDestroyed += () => HandleProxyVanished(newProxy); 
 
-                    if (!_clientLevel.AddProxy(newProxy)) // AddProxy raises OnProxyAdded
+                    if (!_clientLevel.AddProxy(newProxy)) 
                     {
                         Logger.LogError($"[ClientEntityManager] Failed to add new proxy {entityId} (Type: {entityType}) to ClientLevel.");
-                        // Clean up subscriptions if add failed
                         newProxy.OnLoudDestructionSignaled -= () => HandleProxyLoudDestruction(newProxy);
                         newProxy.OnDestroyed -= () => HandleProxyVanished(newProxy);
                     } else {
@@ -65,7 +73,7 @@ namespace Core.Client // Changed namespace
                     Logger.LogError($"[ClientEntityManager] Error creating proxy for EntityID={entityId}: {ex.Message}\n{ex.StackTrace}");
                 }
             }
-            else // For UpdateState, EntityEvent, DestroyEntity (loud), VanishEntity
+            else 
             {
                 if (_clientLevel.TryGetProxy(entityId, out IClientProxy proxy))
                 {
@@ -75,7 +83,6 @@ namespace Core.Client // Changed namespace
                 {
                     if (messageType != MessageType.VanishEntity && messageType != MessageType.DestroyEntity)
                     {
-                        // Log for messages other than cleanup messages for potentially already gone proxies
                         long payloadLength = 0;
                         if(reader != null && reader.BaseStream != null) payloadLength = reader.BaseStream.Length - reader.BaseStream.Position;
                         Logger.LogWarning($"[ClientEntityManager] Received message Type={messageType} for unknown/destroyed EntityID={entityId}. PayloadLength={payloadLength}. Ignoring.");
@@ -87,17 +94,15 @@ namespace Core.Client // Changed namespace
         private void HandleProxyLoudDestruction(IClientProxy proxy)
         {
             Logger.Log($"[ClientEntityManager] Proxy Event: LoudDestructionSignaled for EntityID={proxy.EntityId}, Type={proxy.EntityType}. (Client view should play effects)");
-            // Presentation layer would subscribe to proxy.OnLoudDestructionSignaled directly or via an event aggregator.
         }
 
-        private void HandleProxyVanished(IClientProxy proxy) // Called when proxy.OnDestroyed fires (after VanishEntity message)
+        private void HandleProxyVanished(IClientProxy proxy) 
         {
             Logger.Log($"[ClientEntityManager] Proxy Event: OnDestroyed (vanished) for EntityID={proxy.EntityId}, Type={proxy.EntityType}. Removing from ClientLevel.");
             if (!_clientLevel.RemoveProxy(proxy.EntityId, out _))
             {
                 Logger.LogWarning($"[ClientEntityManager] HandleProxyVanished: Proxy {proxy.EntityId} was already removed from ClientLevel or not found.");
             }
-            // Unsubscribe to prevent memory leaks if this handler was somehow called multiple times (should not happen with proper event handling)
             proxy.OnLoudDestructionSignaled -= () => HandleProxyLoudDestruction(proxy);
             proxy.OnDestroyed -= () => HandleProxyVanished(proxy);
         }
@@ -111,17 +116,13 @@ namespace Core.Client // Changed namespace
 
             if (_clientLevel != null)
             {
-                // Unsubscribe from all existing proxy events before clearing,
-                // as ClearAllProxies might not trigger OnDestroyed on the proxies themselves if they were already gone.
                 foreach(var proxy in _clientLevel.GetAllProxies())
                 {
                     proxy.OnLoudDestructionSignaled -= () => HandleProxyLoudDestruction(proxy);
                     proxy.OnDestroyed -= () => HandleProxyVanished(proxy);
-                     // Call NotifyDestroyed on each proxy to ensure their internal cleanup and OnDestroyed event invocation,
-                     // which then triggers removal from ClientLevel via HandleProxyVanished.
                     proxy.NotifyDestroyed();
                 }
-                _clientLevel.Dispose(); // This will call ClearAllProxies
+                _clientLevel.Dispose(); 
             }
             Logger.Log("[ClientEntityManager] Disposed.");
         }

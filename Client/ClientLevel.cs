@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Core.Network; // For IClientProxy
 using Core.Logging;
+using Core.Time;    // For IClock
 
 namespace Core.Client
 {
@@ -15,40 +16,45 @@ namespace Core.Client
         public event Action<IClientProxy> OnProxyAdded;
         public event Action<IClientProxy> OnProxyRemoved;
 
-        private float _clientSimulatedServerTime = 0f; // Simple accumulated time
+        private readonly IClock _clock;
+        public float CurrentTime => _clock.CurrentTime;
 
-        public ClientLevel()
+        public ClientLevel(IClock clock)
         {
+            _clock = clock ?? throw new ArgumentNullException(nameof(clock));
             Logger.Log("[ClientLevel] Initialized.");
         }
 
         public void DoUpdate(float deltaTime)
         {
-            _clientSimulatedServerTime += deltaTime; // Simplistic time progression
+            // The _clock.CurrentTime will reflect the advancing time.
+            // deltaTime is the frame's delta.
 
             // Iterate a copy of values in case an Update call leads to a proxy being removed
-            // (though typically removal is from network messages, not proxy.Update itself)
             var proxiesToUpdate = _activeProxies.Values.ToList();
             foreach (var proxy in proxiesToUpdate)
             {
-                // Ensure proxy wasn't removed mid-iteration by another thread/callback (unlikely here but good practice)
+                // Ensure proxy wasn't removed mid-iteration by another thread/callback
                 if (!_activeProxies.ContainsKey(proxy.EntityId)) continue;
 
                 try
                 {
-                    proxy.Update(_clientSimulatedServerTime, deltaTime);
+                    // Pass only deltaTime. Proxies can get CurrentTime from this ClientLevel instance.
+                    proxy.Update(deltaTime);
                 }
                 catch (Exception ex)
                 {
                     Logger.LogError($"[ClientLevel] Error updating proxy {proxy.EntityId} (Type: {proxy.EntityType}): {ex.Message}\n{ex.StackTrace}");
-                    // Consider marking proxy as problematic or attempting recovery/resync
                 }
             }
         }
 
         public bool AddProxy(IClientProxy proxy)
         {
-            if (proxy == null) { /* ... */ return false; }
+            if (proxy == null) {
+                Logger.LogWarning("[ClientLevel] Attempted to add a null proxy.");
+                return false;
+            }
             if (_activeProxies.ContainsKey(proxy.EntityId)) {
                 Logger.LogWarning($"[ClientLevel] Proxy ID {proxy.EntityId} (NewType: {proxy.EntityType}, OldType: {_activeProxies[proxy.EntityId].EntityType}) already exists. Replacing.");
                 if (_activeProxies.TryGetValue(proxy.EntityId, out var oldProxy)) {
@@ -71,10 +77,33 @@ namespace Core.Client
             removedProxy = null;
             return false;
         }
-        // ... (TryGetProxy, GetAllProxies, ClearAllProxies, Dispose as before) ...
-        public bool TryGetProxy(int entityId, out IClientProxy proxy) { return _activeProxies.TryGetValue(entityId, out proxy); }
-        public IEnumerable<IClientProxy> GetAllProxies() { return _activeProxies.Values; }
-        public void ClearAllProxies() { Logger.Log($"[ClientLevel] Clearing all {_activeProxies.Count} proxies."); foreach (var proxy in _activeProxies.Values.ToList()) { RemoveProxy(proxy.EntityId, out _); } _activeProxies.Clear(); }
-        public void Dispose() { ClearAllProxies(); OnProxyAdded = null; OnProxyRemoved = null; Logger.Log("[ClientLevel] Disposed."); }
+        
+        public bool TryGetProxy(int entityId, out IClientProxy proxy) 
+        { 
+            return _activeProxies.TryGetValue(entityId, out proxy); 
+        }
+
+        public IEnumerable<IClientProxy> GetAllProxies() 
+        { 
+            return _activeProxies.Values; 
+        }
+
+        public void ClearAllProxies() 
+        { 
+            Logger.Log($"[ClientLevel] Clearing all {_activeProxies.Count} proxies."); 
+            foreach (var proxy in _activeProxies.Values.ToList()) 
+            { 
+                RemoveProxy(proxy.EntityId, out _); 
+            } 
+            _activeProxies.Clear(); 
+        }
+
+        public void Dispose() 
+        { 
+            ClearAllProxies(); 
+            OnProxyAdded = null; 
+            OnProxyRemoved = null; 
+            Logger.Log("[ClientLevel] Disposed."); 
+        }
     }
 }

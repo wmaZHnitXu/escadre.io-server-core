@@ -42,6 +42,12 @@ namespace Core.Model
         /// </summary>
         public event Action<Entity> OnDestructionEvent;
 
+        /// <summary>
+        /// <code>(teleportant, position, rotation)</code> 
+        /// Event raised when the entity is teleported (instantaneous position/rotation change).
+        /// </summary>
+        public event Action<Entity, Vector3, Quaternion> OnTeleported;
+
         public Entity(Level level)
         {
             _level = level;
@@ -73,6 +79,19 @@ namespace Core.Model
             OnDeathEvent?.Invoke(this);
             OnDeathEvent = null;
             ObligatoryOnRemove();
+        }
+
+        public virtual void TeleportTo(Vector3 newPosition, Quaternion newRotation)
+        {
+            if (IsDead)
+            {
+                return;
+            }
+
+            _position = newPosition;
+            _rotation = newRotation;
+            // Logger.Log($"[Entity {Id}] Teleported to Pos: {newPosition}, Rot: {newRotation}");
+            OnTeleported?.Invoke(this, _position, _rotation);
         }
 
         protected virtual void ObligatoryOnRemove()

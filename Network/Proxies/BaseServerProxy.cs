@@ -10,6 +10,12 @@ using Core.Logging;
 
 namespace Core.Network.Proxies
 {
+    // Made public to resolve CS0051
+    public enum BaseProxyEventType : byte 
+    {
+        Teleported = 100 
+    }
+
     public abstract class BaseServerProxy<TEntity> : IServerProxy where TEntity : Entity
     {
         protected readonly TEntity _entity;
@@ -31,6 +37,7 @@ namespace Core.Network.Proxies
         {
             _entity.OnDeathEvent += HandleEntityFinalDeath;
             _entity.OnDestructionEvent += HandleEntityLoudDestruction;
+            _entity.OnTeleported += HandleEntityTeleported; 
             StartReplicatingInternal();
         }
 
@@ -38,6 +45,7 @@ namespace Core.Network.Proxies
         {
             _entity.OnDeathEvent -= HandleEntityFinalDeath;
             _entity.OnDestructionEvent -= HandleEntityLoudDestruction;
+            _entity.OnTeleported -= HandleEntityTeleported; 
             StopReplicatingInternal();
         }
 
@@ -71,22 +79,52 @@ namespace Core.Network.Proxies
             SerializeSpecificCorrectionState(writer);
         }
 
+        // This method sends events specific to derived proxies.
+        // For base proxy events like Teleported, a new method or direct call is used.
         protected void SendEvent(byte specificEventType, Action<BinaryWriter> serializeEventPayloadAction)
         {
             if (_entity.IsDead) return;
             _networkLayer.BroadcastRelevant(EntityId, MessageType.EntityEvent, writer =>
             {
-                writer.Write(specificEventType);
+                writer.Write(specificEventType); // This is the specific event type from the derived proxy
+                serializeEventPayloadAction?.Invoke(writer);
+            });
+        }
+        
+        // Method to send base proxy events
+        protected void SendBaseProxyEvent(BaseProxyEventType baseEventType, Action<BinaryWriter> serializeEventPayloadAction)
+        {
+            if (_entity.IsDead) return;
+            _networkLayer.BroadcastRelevant(EntityId, MessageType.EntityEvent, writer =>
+            {
+                writer.Write((byte)baseEventType); // Cast the base event type to byte
                 serializeEventPayloadAction?.Invoke(writer);
             });
         }
 
+
         private void HandleEntityLoudDestruction(Entity destroyedEntity)
         {
+            if (destroyedEntity.Id != EntityId) return;
             _networkLayer.BroadcastRelevant(EntityId, MessageType.DestroyEntity, writer => { /* No payload */ });
         }
 
-        private void HandleEntityFinalDeath(Entity deadEntity) { }
+        private void HandleEntityFinalDeath(Entity deadEntity) 
+        {
+            if (deadEntity.Id != EntityId) return;
+        }
+
+        private void HandleEntityTeleported(Entity teleportedEntity, Vector3 newPosition, Quaternion newRotation)
+        {
+            if (teleportedEntity.Id != EntityId) return;
+            Logger.Log($"[BaseServerProxy {EntityId}] Entity teleported. Sending event.");
+            // Use SendBaseProxyEvent for base events
+            SendBaseProxyEvent(BaseProxyEventType.Teleported, writer =>
+            {
+                SerializationUtils.WriteVector3(writer, newPosition);
+                SerializationUtils.WriteQuaternion(writer, newRotation);
+            });
+        }
 
         protected virtual float CalculateChecksum()
         {
@@ -96,132 +134,5 @@ namespace Core.Network.Proxies
         protected abstract void SerializeSpecificCorrectionState(BinaryWriter writer);
         protected virtual void StartReplicatingInternal() { }
         protected virtual void StopReplicatingInternal() { }
-    }
-
-    public abstract class BaseClientProxy : IClientProxy
-    {
-        public int EntityId { get; }
-        public abstract Entity.EntityTypeEnum EntityType { get; }
-
-        protected Vector3 _simulatedPosition;
-        protected Quaternion _simulatedRotation;
-        public Vector3 Position => _simulatedPosition;
-        public Quaternion Rotation => _simulatedRotation;
-
-        protected bool _isDestroyed = false;
-
-        public event Action OnDestroyed;
-        public event Action OnLoudDestructionSignaled;
-        public event Action<Vector3> PositionChanged;
-        public event Action<Quaternion> RotationChanged;
-
-        protected BaseClientProxy(int entityId) { EntityId = entityId; }
-
-        public virtual void Initialize(BinaryReader reader)
-        {
-            // Initial state from server is the authoritative start point
-            _simulatedPosition = SerializationUtils.ReadVector3(reader);
-            _simulatedRotation = SerializationUtils.ReadQuaternion(reader);
-            DeserializeSpecificInitialState(reader);
-
-            // Force invoke events on initial set so presentation snaps immediately
-            PositionChanged?.Invoke(_simulatedPosition);
-            RotationChanged?.Invoke(_simulatedRotation);
-        }
-
-        public void HandleNetworkMessage(MessageType messageType, BinaryReader reader)
-        {
-            if (_isDestroyed && messageType != MessageType.VanishEntity) { return; }
-            try
-            {
-                switch (messageType)
-                {
-                    case MessageType.DestroyEntity:
-                        OnLoudDestructionSignaled?.Invoke();
-                        break;
-                    case MessageType.VanishEntity:
-                        NotifyDestroyed();
-                        break;
-                    case MessageType.UpdateState:
-                        DeserializeAndUpdateState(reader);
-                        break;
-                    case MessageType.EntityEvent:
-                        DeserializeAndDispatchEntityEvent(reader);
-                        break;
-                    default:
-                        Logger.LogWarning($"[ClientProxy {EntityId}] Received unhandled message type by proxy: {messageType}");
-                        break;
-                }
-            }
-            catch (Exception ex) { Logger.LogError($"[ClientProxy {EntityId}] Error processing message {messageType}: {ex.Message}"); }
-        }
-
-        protected virtual void DeserializeAndUpdateState(BinaryReader reader) // Authoritative State Correction
-        {
-            var serverAuthPosition = SerializationUtils.ReadVector3(reader);
-            var serverAuthRotation = SerializationUtils.ReadQuaternion(reader);
-
-            // Hard snap to server's authoritative state
-            SetSimulatedPositionAndRotation(serverAuthPosition, serverAuthRotation);
-
-            DeserializeSpecificState(reader);
-            InvokeSpecificStateChangedEvents();
-        }
-
-        protected virtual void DeserializeAndDispatchEntityEvent(BinaryReader reader)
-        {
-            byte specificEventType = reader.ReadByte();
-            HandleSpecificEvent(specificEventType, reader);
-        }
-
-        public virtual void Update(float clientSimulatedServerTime, float deltaTime)
-        {
-            // Base implementation does nothing; derived proxies implement their simulation.
-            // If derived classes update _simulatedPosition or _simulatedRotation,
-            // they are responsible for calling SetSimulatedPosition/Rotation to trigger events.
-        }
-
-        public void NotifyDestroyed() {
-            if (_isDestroyed) return; _isDestroyed = true;
-            OnDestroyed?.Invoke(); CleanupEvents();
-        }
-
-        protected void SetSimulatedPosition(Vector3 newPosition)
-        {
-            if (_simulatedPosition != newPosition)
-            {
-                _simulatedPosition = newPosition;
-                PositionChanged?.Invoke(_simulatedPosition);
-            }
-        }
-
-        protected void SetSimulatedRotation(Quaternion newRotation)
-        {
-            if (_simulatedRotation != newRotation)
-            {
-                _simulatedRotation = newRotation;
-                RotationChanged?.Invoke(_simulatedRotation);
-            }
-        }
-
-        protected void SetSimulatedPositionAndRotation(Vector3 newPosition, Quaternion newRotation)
-        {
-            bool posChanged = _simulatedPosition != newPosition;
-            bool rotChanged = _simulatedRotation != newRotation;
-
-            _simulatedPosition = newPosition;
-            _simulatedRotation = newRotation;
-
-            if (posChanged) PositionChanged?.Invoke(_simulatedPosition);
-            if (rotChanged) RotationChanged?.Invoke(_simulatedRotation);
-        }
-
-        protected virtual void CleanupEvents() {
-            OnDestroyed = null; OnLoudDestructionSignaled = null; PositionChanged = null; RotationChanged = null;
-        }
-        protected abstract void DeserializeSpecificInitialState(BinaryReader reader);
-        protected abstract void DeserializeSpecificState(BinaryReader reader);
-        protected abstract void HandleSpecificEvent(byte specificEventType, BinaryReader reader);
-        protected abstract void InvokeSpecificStateChangedEvents();
     }
 }
