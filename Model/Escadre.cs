@@ -181,7 +181,8 @@ namespace Core.Model
             Logger.Log($"[Escadre {OwnerClientId}] Disbanding (silent: {silentKill}).");
             var idsToKill = new List<int>(_shipEntityIds);
             foreach (int shipIdInList in idsToKill) {
-                if (_level.TryGetEntity(shipIdInList, out Entity entityInLevel) && !entityInLevel.IsDead) {
+                if (_level.TryGetEntity(shipIdInList, out Entity entityInLevel) && !entityInLevel.IsDead)
+                {
                     entityInLevel.Kill(silentKill);
                 }
             }

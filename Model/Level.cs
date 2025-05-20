@@ -34,6 +34,7 @@ namespace Core.Model
 
         public void AddEntity(Entity entity)
         {
+            entity.AssignId(GetNextId());
             _toAdd.Add(entity);
         }
 
@@ -103,8 +104,11 @@ namespace Core.Model
         {
             foreach (Entity entity in _toAdd)
             {
-                if (entity.IsDead) continue;
-                entity.AssignId(GetNextId());
+                if (entity.IsDead)
+                {
+                    _idsFreed.Enqueue(entity.Id);
+                    continue;
+                }
                 _entities.Add(entity);
                 entity.OnDeathEvent += RemoveEntity;
                 OnEntityAddedEvent(entity);

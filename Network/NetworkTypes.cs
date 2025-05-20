@@ -30,10 +30,7 @@ namespace Core.Network
 
         // C->S Session Management
         _ClientConnectRequest = 30,
-        // _ClientDisconnect = 31, // Future consideration
-
-        // S->C Session Management
-        // _ClientConnectResponse = 40, // Optional: For now, successful connection implies server starts sending data
+        _ClientDisconnect = 31, // Added for graceful client-initiated disconnect
     }
 
     public interface IClientProxy
@@ -73,13 +70,11 @@ namespace Core.Network
         void BroadcastRelevant(int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
         void SendToClient(int clientId, int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
         void SendVanishCommand(int entityId, IEnumerable<int> targetClientIds);
-        // Parameters: sendingClientId, entityId (context, 0 for global commands like connect), messageType, payloadReader
-        event Action<int /*sendingClientId*/, int /*entityId*/, MessageType, BinaryReader> OnClientMessageReceived;
+        event Action<int /*sendingNetworkSourceId*/, int /*entityId*/, MessageType, BinaryReader> OnClientMessageReceived;
     }
 
     public interface IClientNetworkLayer
     {
-        // Parameters: entityId (context, 0 for global commands like connect), messageType, payloadAction
         void SendToServer(int entityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
         event Action<int, MessageType, BinaryReader> OnMessageReceived;
     }

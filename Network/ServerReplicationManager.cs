@@ -37,7 +37,7 @@ namespace Core.Network
             _serverClock = serverClock ?? throw new ArgumentNullException(nameof(serverClock)); 
 
             _level.OnEntityAddedEvent += HandleEntityAddedToLevel; 
-            _networkLayer.OnClientMessageReceived += HandleClientMessage;
+            _networkLayer.OnClientMessageReceived += HandleClientMessage_GameLogic;
             _visibilityManager.EntityEnteredPvs += HandleEntityEnteredPvs;
             _visibilityManager.EntityLeftPvs += HandleEntityLeftPvs;
             Logger.Log("[ServerReplicationManager] Initialized.");
@@ -141,13 +141,32 @@ namespace Core.Network
             catch (Exception ex) { Logger.LogError($"[SRM] Error processing EntityLeftPvs for {entityId} to client {clientId}: {ex.Message}\nStackTrace: {ex.StackTrace}"); }
         }
 
-
-        private void HandleClientMessage(int clientId, int entityId, MessageType messageType, BinaryReader reader)
+        private void HandleClientMessage_GameLogic(int sourceNetworkId, int entityIdContext, MessageType messageType, BinaryReader reader)
         {
             if (_isDisposed) return;
-            if (!_clientConnections.TryGetValue(clientId, out ClientConnection clientConnection))
+
+            // SRM ignores session management messages; CoreComposer handles them.
+            if (messageType == MessageType._ClientConnectRequest || messageType == MessageType._ClientDisconnect)
             {
-                Logger.LogWarning($"[SRM] Received message from unknown ClientId: {clientId}. Type: {messageType}");
+                return; 
+            }
+
+            // For game logic messages, SRM needs the gameClientId, not the sourceNetworkId,
+            // if they can be different (which they can be).
+            // CoreComposer maintains the mapping from sourceNetworkId to gameClientId.
+            // SRM needs access to this mapping or needs the gameClientId passed to it.
+            // For now, we assume sourceNetworkId IS the gameClientId for SRM's context AFTER connection.
+            // This is a simplification in the mock setup. A real system would have a clear gameClientId context.
+            // Let's use sourceNetworkId as the clientId for looking up ClientConnection for game messages.
+            // This implies that after CoreComposer maps sourceNetworkId to gameClientId, all subsequent messages
+            // from that sourceNetworkId are considered to be from that gameClientId.
+            
+            int gameClientId = sourceNetworkId; // Assuming sourceNetworkId is treated as gameClientId for SRM after connection.
+                                                // This simplification might need review in a multi-client-instance-per-sourceNetworkId scenario.
+
+            if (!_clientConnections.TryGetValue(gameClientId, out ClientConnection clientConnection))
+            {
+                Logger.LogWarning($"[SRM] Received game logic message (Type: {messageType}) from unestablished/unknown GameClient ID: {gameClientId} (derived from SourceNetworkID: {sourceNetworkId}). Ignoring.");
                 return;
             }
 
@@ -156,54 +175,50 @@ namespace Core.Network
             switch (messageType)
             {
                 case MessageType._ClientSyncState:
-                    if (_activeProxies.TryGetValue(entityId, out IServerProxy proxy))
+                    if (_activeProxies.TryGetValue(entityIdContext, out IServerProxy proxy))
                     {
                         if (proxy.CheckClientSyncState(reader))
                         {
-                            _networkLayer.SendToClient(clientId, entityId, MessageType.UpdateState, proxy.SerializeCorrectionState);
+                            _networkLayer.SendToClient(gameClientId, entityIdContext, MessageType.UpdateState, proxy.SerializeCorrectionState);
                         }
                     }
-                    else { Logger.LogWarning($"[SRM CId={clientId}] _ClientSyncState for unknown EntityProxy ID: {entityId}."); }
+                    else { Logger.LogWarning($"[SRM CId={gameClientId}] _ClientSyncState for unknown EntityProxy ID: {entityIdContext}."); }
                     break;
-                case MessageType._SetCourse: try { clientConnection.RequestSetCourse(SerializationUtils.ReadVector2(reader), currentTime); } catch (Exception ex) { Logger.LogError($"[SRM CId={clientId}] Error processing _SetCourse: {ex.Message}"); } break;
-                case MessageType._AttackEscadre: try { clientConnection.RequestAttackEscadre(reader.ReadInt32(), currentTime); } catch (Exception ex) { Logger.LogError($"[SRM CId={clientId}] Error processing _AttackEscadre: {ex.Message}"); } break;
-                case MessageType._CancelAttack: try { clientConnection.RequestCancelAttack(); } catch (Exception ex) { Logger.LogError($"[SRM CId={clientId}] Error processing _CancelAttack: {ex.Message}"); } break;
-                case MessageType._UpgradeShip: try { clientConnection.RequestUpgradeShip(reader.ReadInt32()); } catch (Exception ex) { Logger.LogError($"[SRM CId={clientId}] Error processing _UpgradeShip: {ex.Message}"); } break;
+                case MessageType._SetCourse: try { clientConnection.RequestSetCourse(SerializationUtils.ReadVector2(reader), currentTime); } catch (Exception ex) { Logger.LogError($"[SRM CId={gameClientId}] Error processing _SetCourse: {ex.Message}"); } break;
+                case MessageType._AttackEscadre: try { clientConnection.RequestAttackEscadre(reader.ReadInt32(), currentTime); } catch (Exception ex) { Logger.LogError($"[SRM CId={gameClientId}] Error processing _AttackEscadre: {ex.Message}"); } break;
+                case MessageType._CancelAttack: try { clientConnection.RequestCancelAttack(); } catch (Exception ex) { Logger.LogError($"[SRM CId={gameClientId}] Error processing _CancelAttack: {ex.Message}"); } break;
+                case MessageType._UpgradeShip: try { clientConnection.RequestUpgradeShip(reader.ReadInt32()); } catch (Exception ex) { Logger.LogError($"[SRM CId={gameClientId}] Error processing _UpgradeShip: {ex.Message}"); } break;
                 case MessageType._BuyShip: 
                     try 
                     { 
                         int shipDesignId = reader.ReadInt32();
-                        // The _BuyShip message from client does not currently contain a spawn position.
-                        // A proper ShopManager would determine this, or the client message needs to be extended.
-                        // For now, passing a placeholder. This will hit the NotImplementedException in Escadre.
-                        Vector3 placeholderSpawnPosition = Vector3.Zero; 
+                        Vector3 placeholderSpawnPosition = clientConnection.EscadreInstance != null ? 
+                                                           clientConnection.EscadreInstance.CalculateCenterPoint() + new Vector3(5,0,5) : 
+                                                           new Vector3( (gameClientId % 5) * 10f, 0, (gameClientId / 5) * 10f); 
                         clientConnection.RequestBuyShip(shipDesignId, placeholderSpawnPosition, currentTime); 
                     } 
                     catch (NotImplementedException nie)
                     {
-                        Logger.LogWarning($"[SRM CId={clientId}] _BuyShip failed: {nie.Message}. This is expected until ShopManager is implemented.");
+                        Logger.LogWarning($"[SRM CId={gameClientId}] _BuyShip failed: {nie.Message}. This is expected until ShopManager is implemented.");
                     }
                     catch (Exception ex) 
                     { 
-                        Logger.LogError($"[SRM CId={clientId}] Error processing _BuyShip: {ex.Message}"); 
+                        Logger.LogError($"[SRM CId={gameClientId}] Error processing _BuyShip: {ex.Message}"); 
                     } 
                     break;
-                default: Logger.LogWarning($"[SRM CId={clientId}] Received unhandled MessageType ({messageType}) for Entity {entityId}."); break;
+                default: 
+                    // This default case should ideally not be hit for valid game messages.
+                    // If it is, it means a MessageType was sent that SRM's game logic doesn't recognize.
+                    Logger.LogWarning($"[SRM CId={gameClientId}] Received unhandled GameLogic MessageType ({messageType}) for Entity {entityIdContext}. This might indicate a missing case in SRM's game message handler."); 
+                    break;
             }
-        }
-
-        public void UpdateCoreModel(float delta) 
-        {
-            if (_isDisposed) return;
-            try { _level.DoUpdate(delta); }
-            catch (Exception ex) { Logger.LogError($"[SRM] Error during Level Update (if called directly): {ex.Message}\nStackTrace: {ex.StackTrace}"); }
         }
 
         public void Dispose()
         {
             if (_isDisposed) return; _isDisposed = true;
             Logger.Log("[ServerReplicationManager] Disposing...");
-            if (_networkLayer != null) _networkLayer.OnClientMessageReceived -= HandleClientMessage;
+            if (_networkLayer != null) _networkLayer.OnClientMessageReceived -= HandleClientMessage_GameLogic;
             if (_visibilityManager != null) { _visibilityManager.EntityEnteredPvs -= HandleEntityEnteredPvs; _visibilityManager.EntityLeftPvs -= HandleEntityLeftPvs; }
             if (_level != null) _level.OnEntityAddedEvent -= HandleEntityAddedToLevel;
 
