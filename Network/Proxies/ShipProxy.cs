@@ -13,7 +13,7 @@ namespace Core.Network.Proxies
     {
         internal enum ShipEventType : byte
         {
-            SetMovementTarget = 1,
+            SetMovementTarget = 101,
         }
 
         public class ServerProxy : DestructibleEntityProxy.ServerProxy<Ship>
@@ -249,24 +249,49 @@ namespace Core.Network.Proxies
                 base.Update(deltaTime); 
                 if (deltaTime <= 0f) return;
 
-                var result = SimulateMovementStep(
-                    _simulatedPosition, _simulatedRotation, _clientSimulatedSpeed,
-                    _currentMovementTarget, this.MaxSpeed, this.TurnRate, deltaTime, _isMovingClientSide
+                // If not actively moving client-side, don't try to predict new positions.
+                // The position will be updated by server corrections or new SetMovementTarget events.
+                if (!_isMovingClientSide || !_currentMovementTarget.HasValue)
+                {
+                    // Optionally, if speed is > 0, simulate deceleration here, but without changing position based on a null target
+                    if (_clientSimulatedSpeed > 0)
+                    {
+                        _clientSimulatedSpeed = Math.Max(0, _clientSimulatedSpeed - (MaxSpeed * 2f * deltaTime)); // Match server ship deceleration logic
+                        CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
+                    }
+                    else { _clientSimulatedSpeed = 0f; }
+                    return; // Important: return here if no active client-side movement
+                }
+
+                // Existing client-side prediction logic from SimulateMovementStep would follow here
+                // This part is assumed to be similar to what was in SimulateMovementStep
+                // but operating directly on _simulatedPosition, _simulatedRotation, _clientSimulatedSpeed
+
+                var simResult = SimulateMovementStep(
+                    _simulatedPosition, 
+                    _simulatedRotation, 
+                    _clientSimulatedSpeed, 
+                    _currentMovementTarget, 
+                    MaxSpeed, 
+                    TurnRate, 
+                    deltaTime, 
+                    _isMovingClientSide
                 );
 
-                SetSimulatedPositionAndRotation(result.newPos, result.newRot);
-                if (Math.Abs(_clientSimulatedSpeed - result.newSpeed) > float.Epsilon)
+                SetSimulatedPositionAndRotation(simResult.newPos, simResult.newRot);
+                
+                if (Math.Abs(_clientSimulatedSpeed - simResult.newSpeed) > float.Epsilon)
                 {
-                    _clientSimulatedSpeed = result.newSpeed;
+                    _clientSimulatedSpeed = simResult.newSpeed;
                     CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
                 }
-                
-                _isMovingClientSide = result.stillMoving;
-                if (!_isMovingClientSide && _currentMovementTarget.HasValue) // If simulation stopped it, clear target
-                {
-                    _currentMovementTarget = null; 
-                    // Logger.Log($"[ShipProxy.Client {EntityId}] Movement target reached/cleared by simulation step.");
-                }
+
+                _isMovingClientSide = simResult.stillMoving;
+                if (!_isMovingClientSide) {
+                    // Reached target according to client prediction
+                     _currentMovementTarget = null; 
+                    // Logger.Log($"[ShipProxy.Client {EntityId}] Client-side movement target reached/stopped.");
+                }            
             }
 
             protected override void CleanupEvents() {

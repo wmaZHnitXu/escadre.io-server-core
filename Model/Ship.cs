@@ -8,8 +8,8 @@ namespace Core.Model
 {
     public abstract class Ship : DestructibleEntity
     {
-        public int OwningEscadreClientId { get; }
-        public Escadre OwningEscadre { get; } 
+        public int OwningEscadreClientId { get; } // Client ID of the owner of the Escadre this ship belongs to
+        public Escadre OwningEscadre { get; } // The Escadre Entity this ship belongs to
 
         public float CurrentSpeed { get; protected set; }
         public bool IsMoving { get; protected set; }
@@ -29,7 +29,7 @@ namespace Core.Model
             : base(level, maxHealth)
         {
             OwningEscadre = ownerEscadre ?? throw new ArgumentNullException(nameof(ownerEscadre));
-            OwningEscadreClientId = ownerEscadre.OwnerClientId;
+            OwningEscadreClientId = ownerEscadre.OwnerClientId; // Get OwnerClientId from the Escadre entity
             Position = initialPosition;
             Rotation = Quaternion.Identity; 
             IsMoving = false;
@@ -56,18 +56,15 @@ namespace Core.Model
 
             if (targetWorldPosition.HasValue)
             {
-                IsMoving = true; // External command to move
+                IsMoving = true;
             }
             else
             {
-                // If target is cleared externally, IsMoving might be set false here or let UpdateMovement decide.
-                // For now, clearing the target implies the *intent* to stop or change behavior.
-                // UpdateMovement will handle actual stopping.
-                 IsMoving = false; // Explicitly stop if target is cleared
-                 CurrentSpeed = 0f; // Snap speed to 0 if command is to stop
+                 IsMoving = false; 
+                 CurrentSpeed = 0f; 
             }
 
-            if (changed || targetWorldPosition.HasValue) // Fire event if target changes or is (re)set
+            if (changed || targetWorldPosition.HasValue)
             {
                 OnMovementTargetProgrammed?.Invoke(this, _movementTargetPosition, serverTime);
             }
@@ -76,8 +73,6 @@ namespace Core.Model
 
         protected virtual void UpdateMovement(float deltaTime)
         {
-            // If not externally ordered to move via SetMovementTarget (which sets IsMoving)
-            // or if no target position is set, decelerate and stop.
             if (!IsMoving || !_movementTargetPosition.HasValue)
             {
                 if (CurrentSpeed > 0)
@@ -85,7 +80,7 @@ namespace Core.Model
                     CurrentSpeed = Math.Max(0, CurrentSpeed - (MaxSpeed * 2f * deltaTime)); 
                 }
                 else { CurrentSpeed = 0f; }
-                IsMoving = false; // Ensure IsMoving is false if we are stopping/stopped.
+                IsMoving = false; 
                 return;
             }
 
@@ -95,19 +90,15 @@ namespace Core.Model
 
             float distanceToTargetSq = toTarget.SqrMagnitude;
             
-            // Server's stopping condition based on its own deltaTime and MaxSpeed
-            float stoppingDistance = MaxSpeed * deltaTime * 0.5f; // How far it *will* move this frame
+            float stoppingDistance = MaxSpeed * deltaTime * 0.5f; 
             float stoppingDistanceSq = stoppingDistance * stoppingDistance;
-            // Ensure a minimum practical threshold to prevent endless tiny movements or division issues
-            stoppingDistanceSq = Math.Max(0.0025f, stoppingDistanceSq); // e.g., 0.05 * 0.05
+            stoppingDistanceSq = Math.Max(0.0025f, stoppingDistanceSq); 
 
             if (distanceToTargetSq < stoppingDistanceSq)
             {
                 IsMoving = false; 
                 CurrentSpeed = 0f;
-                // Snap to target XZ to ensure it truly arrives for game logic
                 Position = new Vector3(targetPos2D.X, Position.Y, targetPos2D.Y); 
-                // Logger.Log($"[Ship {Id} SERVER] Reached movement target {targetPos2D}.");
                 return;
             }
 
@@ -138,9 +129,10 @@ namespace Core.Model
                 _currentAttackCooldownTimer -= deltaTime;
             }
 
-            if (IsDead || _currentAttackCooldownTimer > 0) return;
+            if (IsDead || _currentAttackCooldownTimer > 0 || OwningEscadre == null || OwningEscadre.IsDead) return;
 
-            if (!OwningEscadre.TargetEscadreOwnerClientIds.Any()) return;
+            // Use TargetEscadreEntityIds from the OwningEscadre Entity
+            if (!OwningEscadre.TargetEscadreEntityIds.Any()) return;
 
             Ship targetShip = FindBestTarget();
 
@@ -153,12 +145,15 @@ namespace Core.Model
 
         protected Ship FindBestTarget()
         {
+            if (OwningEscadre == null || OwningEscadre.IsDead) return null;
+
             Ship bestTarget = null;
             float closestDistSq = AttackRange * AttackRange;
 
-            foreach (int targetOwnerId in OwningEscadre.TargetEscadreOwnerClientIds)
+            // Iterate through the target Escadre Entity IDs stored in the OwningEscadre
+            foreach (int targetEscadreEntityId in OwningEscadre.TargetEscadreEntityIds)
             {
-                if (_level.TryGetEscadre(targetOwnerId, out Escadre targetEscadre))
+                if (_level.TryGetEntity(targetEscadreEntityId, out Entity targetEntity) && targetEntity is Escadre targetEscadre && !targetEscadre.IsDead)
                 {
                     foreach (int enemyShipId in targetEscadre.ShipEntityIds)
                     {
@@ -174,13 +169,17 @@ namespace Core.Model
                         }
                     }
                 }
+                // If a primary target escadre yields a bestTarget, we can break early or continue searching other target escadres.
+                // For simplicity, let's assume the first target escadre in the list is prioritized.
+                // If we want to pick the absolute closest ship from *any* targeted escadre, remove this 'if bestTarget != null break;'
+                if (bestTarget != null) break; 
             }
             return bestTarget;
         }
 
         protected virtual void PerformAttackOn(Ship target)
         {
-            Logger.Log($"[Ship {Id}] Attacking Ship {target.Id} of client {target.OwningEscadreClientId}.");
+            Logger.Log($"[Ship {Id}] Attacking Ship {target.Id} of client {target.OwningEscadreClientId} (Escadre Entity: {target.OwningEscadre.Id}).");
             DamageInfo damage = new DamageInfo(
                 AttackDamage,
                 DamageType.Kinetic,
@@ -192,9 +191,30 @@ namespace Core.Model
             target.ApplyDamage(damage);
         }
         
+        // Override Entity.Death() for specific Ship death behavior
+        protected override void Death()
+        {
+            base.Death(); // Call base DestructibleEntity.Death
+
+            // Notify the owning escadre that this ship has been destroyed
+            if (OwningEscadre != null && !OwningEscadre.IsDead) // Check if escadre still exists
+            {
+                OwningEscadre.HandleShipDestroyed(this.Id);
+            }
+            Logger.Log($"[Ship {Id}] Ship Death() processed. Notified Escadre {OwningEscadre?.Id}.");
+        }
+
         public virtual void PerformUpgrade()
         {
             Logger.Log($"[Ship {Id}] Base PerformUpgrade called. No changes by default.");
+            // Derived classes will implement specific stat changes.
+        }
+
+        protected override void ObligatoryOnRemove()
+        {
+            base.ObligatoryOnRemove();
+            OnMovementTargetProgrammed = null; // Clear events
+            // The OwningEscadre will handle removing this ship from its lists when the ship dies.
         }
     }
 }

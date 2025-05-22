@@ -32,7 +32,7 @@ namespace Core
         private readonly Dictionary<int, int> _gameClientIdToSourceNetworkIdMap = new Dictionary<int, int>();
 
 
-        public event Action<ClientConnection> ClientRegisteredEvent;
+        public event Action<ClientConnection> ClientRegisteredEvent; // Still useful for systems that need to know when a client is fully set up
         public event Action<ClientConnection> ClientUnregisteredEvent;
 
         public CoreComposer(IServerNetworkLayer networkLayer, 
@@ -49,7 +49,11 @@ namespace Core
 
             ServerLevel = new Level(); 
             VisibilityManager = new VisibilityManager(_visibilityStrategy);
-            _replicationManager = new ServerReplicationManager(ServerLevel, _networkLayer, VisibilityManager, _clientConnections, _serverClock, this); 
+            // Pass 'this' (CoreComposer) to SRM so it can subscribe to ClientRegistered/Unregistered events
+            // This is if SRM needs to do specific setup for EscadreProxy *entities* when a client connects,
+            // but now Escadre is a generic entity, so specific SRM handling for it might be less.
+            // For now, SRM doesn't need CoreComposer reference for EscadreProxy creation as it's handled by generic entity flow.
+            _replicationManager = new ServerReplicationManager(ServerLevel, _networkLayer, VisibilityManager, _clientConnections, _serverClock); 
             
             _networkLayer.OnClientMessageReceived += HandleNetworkMessage_SessionManagement;
 
@@ -63,7 +67,6 @@ namespace Core
             if (messageType == MessageType._ClientConnectRequest)
             {
                 Logger.Log($"[CoreComposer] Received _ClientConnectRequest from network source ID {sourceNetworkId}.");
-
                 ClientIdentity? identity = _connectionValidator.ValidateTokenAndGetIdentity(reader);
 
                 if (identity.HasValue)
@@ -71,17 +74,16 @@ namespace Core
                     ClientIdentity validatedIdentity = identity.Value;
                     if (_clientConnections.ContainsKey(validatedIdentity.ClientId))
                     {
-                        Logger.LogWarning($"[CoreComposer] Client ID {validatedIdentity.ClientId} (from token) is already connected. Current policy: Rejecting new connection for this ID from source {sourceNetworkId}.");
+                        Logger.LogWarning($"[CoreComposer] Client ID {validatedIdentity.ClientId} (from token) is already connected. Rejecting new connection from source {sourceNetworkId}.");
                         return;
                     }
                     if (_sourceNetworkIdToGameClientIdMap.ContainsKey(sourceNetworkId))
                     {
                         Logger.LogWarning($"[CoreComposer] Network Source ID {sourceNetworkId} is already associated with game client {_sourceNetworkIdToGameClientIdMap[sourceNetworkId]}. New connect request from same source for different/new identity {validatedIdentity.ClientId} - this might indicate a client bug or reconnect attempt not fully handled. Overwriting mapping for now.");
                         int oldGameId = _sourceNetworkIdToGameClientIdMap[sourceNetworkId];
-                        if(_clientConnections.ContainsKey(oldGameId)) UnregisterClient(oldGameId); 
+                        if(_clientConnections.ContainsKey(oldGameId)) UnregisterClient(oldGameId, true);  // Pass a flag to indicate it's a forceful unregister due to new connection
                         else { _gameClientIdToSourceNetworkIdMap.Remove(oldGameId); _sourceNetworkIdToGameClientIdMap.Remove(sourceNetworkId); } 
                     }
-
 
                     Logger.Log($"[CoreComposer] Token validated for client. JWT ClientID: {validatedIdentity.ClientId}, Nick: '{validatedIdentity.Nickname}', Admin: {validatedIdentity.IsAdmin}, AuthType: {validatedIdentity.AuthType}. Proceeding to register client session.");
                     
@@ -92,7 +94,7 @@ namespace Core
                     float z = ((validatedIdentity.ClientId / 7) % 7) * 25f - 75f;
                     Vector3 spawnPosition = new Vector3(x, 0, z);
                     
-                    CreateClientSessionAndEscadre(validatedIdentity, pvsRadius, spawnPosition, sourceNetworkId);
+                    CreateClientSessionAndEscadreEntity(validatedIdentity, pvsRadius, spawnPosition, sourceNetworkId);
                 }
                 else
                 {
@@ -114,69 +116,63 @@ namespace Core
             }
         }
 
-        private ClientConnection CreateClientSessionAndEscadre(ClientIdentity identity, float initialPvsRadius, Vector3 initialSpawnPosition, int sourceNetworkId)
+        private ClientConnection CreateClientSessionAndEscadreEntity(ClientIdentity identity, float initialPvsRadius, Vector3 initialSpawnPosition, int sourceNetworkId)
         {
             if (_isDisposed) { Logger.LogWarning("[CoreComposer] Attempted to create session on disposed composer."); return null; }
             if (_clientConnections.ContainsKey(identity.ClientId)) { 
-                Logger.LogError($"[CoreComposer] CRITICAL: Attempt to create session for already existing ClientID {identity.ClientId} in CreateClientSessionAndEscadre."); 
+                Logger.LogError($"[CoreComposer] CRITICAL: Attempt to create session for already existing ClientID {identity.ClientId} in CreateClientSessionAndEscadreEntity."); 
                 return _clientConnections[identity.ClientId]; 
             }
 
-            // ** STEP 1: Establish Mappings **
             _sourceNetworkIdToGameClientIdMap[sourceNetworkId] = identity.ClientId;
             _gameClientIdToSourceNetworkIdMap[identity.ClientId] = sourceNetworkId;
             
-            // ** STEP 2: Inform MockNetworkLayer about the mapping for S->C message routing **
-            // This MUST happen BEFORE any S->C messages are sent using the gameClientId.
             if (_networkLayer is MockNetworkLayer mockLayer)
             {
                 mockLayer.MapNetworkSourceToClientId(sourceNetworkId, identity.ClientId);
                 Logger.Log($"[CoreComposer] MockNetworkLayer mapping established for GameClient {identity.ClientId} <-> NetworkSource {sourceNetworkId}.");
             }
 
-            // ** STEP 3: Create ClientConnection and Escadre **
             var clientConnection = new ClientConnection(identity.ClientId, ServerLevel, initialPvsRadius); 
             _clientConnections.Add(identity.ClientId, clientConnection); 
-            VisibilityManager.AddOrUpdateClientView(clientConnection);
+            VisibilityManager.AddOrUpdateClientView(clientConnection); // Client view now centered on Escadre entity
 
-            Escadre escadre = new Escadre(identity.ClientId, ServerLevel);
-            if (!ServerLevel.AddEscadre(escadre))
-            {
-                Logger.LogError($"[CoreComposer] Failed to add escadre for client {identity.ClientId} to Level. Cleaning up partially created session.");
-                VisibilityManager.RemoveClientView(identity.ClientId); 
-                _clientConnections.Remove(identity.ClientId); 
-                _sourceNetworkIdToGameClientIdMap.Remove(sourceNetworkId);
-                _gameClientIdToSourceNetworkIdMap.Remove(identity.ClientId);
-                if (_networkLayer is MockNetworkLayer mockLayerCleanup) // Clean up mapping if session creation failed
-                {
-                    mockLayerCleanup.RemoveNetworkSourceMappingForClientId(identity.ClientId);
-                }
-                return null;
-            }
-            clientConnection.AssignEscadre(escadre);
+            // Create Escadre as an Entity
+            Escadre escadreEntity = new Escadre(ServerLevel, identity.ClientId, identity.Nickname, initialSpawnPosition);
+            // ServerLevel.AddEntity(escadreEntity); // Already done by Escadre constructor
             
-            Ship initialShip = new DefaultShip(ServerLevel, escadre, initialSpawnPosition);
-            escadre.AddShip(initialShip); 
-            escadre.UpdateShipMovementTargets(_serverClock.CurrentTime);
+            // Escadre entity creation will be picked up by ServerReplicationManager via Level.OnEntityAddedEvent
+            // and then replicated to clients (including the owner).
 
+            clientConnection.AssignEscadre(escadreEntity); // ClientConnection now holds reference to Escadre Entity
+            
+            // Add initial ship to this escadre
+            Ship initialShip = new DefaultShip(ServerLevel, escadreEntity, initialSpawnPosition); // Ship takes Escadre entity
+            // escadreEntity.AddShip(initialShip); // AddShip is internal, called by Shop or initial setup.
+                                               // Here, directly add. Note: ID might not be set yet by Level if _toAdd not processed.
+                                               // Let's assume initialShip's constructor adds it to level, and Level assigns ID before AddShip is called by shop.
+                                               // For initial setup, let's ensure ship is added to Level first, then to escadre.
+                                               // The DefaultShip constructor already calls Level.AddEntity.
+                                               // We need to ensure its ID is assigned *before* AddShip if formation relies on it immediately.
+                                               // For now, let AddShip handle adding it to the formation with auto-slotting.
+            escadreEntity.AddShip(initialShip);
+            escadreEntity.UpdateShipMovementTargets(_serverClock.CurrentTime);
 
-            Logger.Log($"[CoreComposer] Client Session Created & Registered: ID={identity.ClientId}, Nick='{identity.Nickname}', Admin={identity.IsAdmin}, AuthType={identity.AuthType}. Mapped to NetworkSourceID: {sourceNetworkId}.");
+            Logger.Log($"[CoreComposer] Client Session Created & Registered: ID={identity.ClientId}, Nick='{identity.Nickname}'. Mapped to NetworkSourceID: {sourceNetworkId}. Escadre Entity ID: {escadreEntity.Id}");
 
-            // ** STEP 4: NOW invoke ClientRegisteredEvent, after network mapping is ready **
             ClientRegisteredEvent?.Invoke(clientConnection); 
             
             return clientConnection;
         }
 
-        public void UnregisterClient(int gameClientId) 
+        public void UnregisterClient(int gameClientId, bool dueToOverwrite = false) 
         {
             if (_isDisposed) return;
             if (_clientConnections.TryGetValue(gameClientId, out ClientConnection clientConnection))
             {
-                Logger.Log($"[CoreComposer] Unregistering Game Client ID {gameClientId}.");
+                Logger.Log($"[CoreComposer] Unregistering Game Client ID {gameClientId}. Due to overwrite: {dueToOverwrite}");
                 ClientConnection tempConnectionReference = clientConnection; 
 
-                // Fire event first, so SRM can stop its EscadreProxy *before* we potentially tear down the EscadreInstance
                 ClientUnregisteredEvent?.Invoke(tempConnectionReference); 
 
                 if (_gameClientIdToSourceNetworkIdMap.TryGetValue(gameClientId, out int sourceNetworkId))
@@ -193,13 +189,15 @@ namespace Core
                 else { Logger.LogWarning($"[CoreComposer] No sourceNetworkId mapping found for Game Client ID {gameClientId} during unregistration."); }
 
 
-                VisibilityManager.RemoveClientView(gameClientId);
-                if (clientConnection.EscadreInstance != null)
+                VisibilityManager.RemoveClientView(gameClientId); // PVS source is Escadre, which will be destroyed
+                
+                if (clientConnection.EscadreEntity != null)
                 {
-                    clientConnection.EscadreInstance.Disband(true); 
-                    ServerLevel.RemoveEscadre(clientConnection.EscadreInstance.OwnerClientId);
+                    Logger.Log($"[CoreComposer] Killing Escadre Entity ID {clientConnection.EscadreEntity.Id} for client {gameClientId}.");
+                    clientConnection.EscadreEntity.Kill(true); // Kill the Escadre entity silently
+                    // ServerLevel.RemoveEntity(clientConnection.EscadreEntity) will be handled by Level's death processing
                 }
-                clientConnection.ClearEscadreReference(); 
+                clientConnection.ClearEscadreReference(); // Clears reference in ClientConnection
                 clientConnection.SetState(ClientState.Destroyed); 
                 _clientConnections.Remove(gameClientId);
             } else { Logger.LogWarning($"[CoreComposer] Attempted to unregister unknown client: {gameClientId}"); }
@@ -211,15 +209,27 @@ namespace Core
             try
             {
                 ServerLevel.DoUpdate(deltaTime); 
+                // Register all entities (including Escadres) with VisibilityManager
                 foreach (var entity in ServerLevel.GetAllEntities()) 
                 {
-                    VisibilityManager.RegisterEntity(entity); 
+                    if (!entity.IsDead) // Only register living entities for visibility calculation
+                    {
+                        VisibilityManager.RegisterEntity(entity); 
+                    }
                 }
+                // Update client views - PVS is now centered on their Escadre entity's position
                 foreach (var clientConn in _clientConnections.Values.ToList()) 
                 {
-                    if (clientConn.CurrentState != ClientState.Destroyed) 
+                    if (clientConn.CurrentState != ClientState.Destroyed && clientConn.EscadreEntity != null && !clientConn.EscadreEntity.IsDead) 
                     {
+                        // ClientConnection.Position property now correctly reflects EscadreEntity.Position
                         VisibilityManager.AddOrUpdateClientView(clientConn);
+                    }
+                    else if (clientConn.CurrentState != ClientState.Destroyed && (clientConn.EscadreEntity == null || clientConn.EscadreEntity.IsDead))
+                    {
+                        // If escadre is gone but client still connected (e.g. spectating), PVS might be static or based on spectator cam
+                        // For now, if escadre is dead, client view might become invalid for PVS until re-spawn or proper spectator.
+                        // VisibilityManager.RemoveClientView(clientConn.ClientId); // Or update to a spectator view
                     }
                 }
                 VisibilityManager.UpdateAllClientVisibility();
@@ -244,8 +254,8 @@ namespace Core
             _gameClientIdToSourceNetworkIdMap.Clear();
 
             _replicationManager?.Dispose(); 
-            VisibilityManager?.Dispose();
-            ServerLevel?.Destroy(); 
+            VisibilityManager?.Dispose(); // VisibilityManager.UnregisterEntity will be called for Escadres
+            ServerLevel?.Destroy(); // This will kill all entities, including Escadres
             _visibilityStrategy?.Dispose();
 
             ClientRegisteredEvent = null;

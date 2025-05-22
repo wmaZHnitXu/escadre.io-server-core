@@ -8,11 +8,13 @@ namespace Core.Model
         public enum EntityTypeEnum
         {
             Debug,
+            Escadre,
             DefaultShip
         }
         public abstract EntityTypeEnum EntityType { get; }
         public int Id { get; private set; }
         protected readonly Level _level;
+        public Level Level => _level;
         private Vector3 _position;
         public virtual Vector3 Position
         {

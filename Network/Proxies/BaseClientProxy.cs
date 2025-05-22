@@ -150,6 +150,18 @@ namespace Core.Network.Proxies
             bool posChanged = _simulatedPosition != newPosition;
             bool rotChanged = _simulatedRotation != newRotation;
 
+            // User observation: Original (X, Y, Z) might become (0, X, 0)
+            // Check if newX and newZ are close to zero, and newY is close to the old _simulatedPosition.X
+            if (Math.Abs(newPosition.X) < 0.01f && 
+                Math.Abs(newPosition.Z) < 0.01f &&
+                _simulatedPosition != null && // Ensure _simulatedPosition has been initialized
+                Math.Abs(newPosition.Y - _simulatedPosition.X) < 0.01f &&
+                (_simulatedPosition.X != 0f || Math.Abs(newPosition.Y) > 0.01f) && // Avoid trivial (0,0,0) from (0,Y,Z) old pos, ensure oldX or newY is significant
+                newPosition != _simulatedPosition) // Log only if it's a change to this specific pattern
+            {
+                Logger.LogWarning($"[BaseClientProxy {EntityId}] SetSimulatedPositionAndRotation: Detected suspicious (0, oldX, 0) transform. OldPos: {_simulatedPosition}, NewPos: {newPosition}. Stack: {Environment.StackTrace}");
+            }
+
             _simulatedPosition = newPosition;
             _simulatedRotation = newRotation;
 
