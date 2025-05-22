@@ -57,7 +57,54 @@ namespace Core
             
             _networkLayer.OnClientMessageReceived += HandleNetworkMessage_SessionManagement;
 
+            // Subscribe to entity removal to handle Escadre destruction
+            ServerLevel.OnEntityRemovedEvent += HandleEntityRemoved; 
+
             Logger.Log("[CoreComposer] Initialization Complete. Listening for client connections.");
+        }
+
+        private void HandleEntityRemoved(Entity entity)
+        {
+            if (_isDisposed) return;
+
+            if (entity is Escadre destroyedEscadre)
+            {
+                Logger.Log($"[CoreComposer] Detected removal of Escadre Entity ID {destroyedEscadre.Id}, Owner: {destroyedEscadre.OwnerClientId}. Checking for associated client connection.");
+                if (_clientConnections.TryGetValue(destroyedEscadre.OwnerClientId, out ClientConnection clientConnection))
+                {
+                    // Check if the client is still considered active with this escadre
+                    if (clientConnection.EscadreEntity == destroyedEscadre && clientConnection.CurrentState != ClientState.Destroyed)
+                    {
+                        Logger.Log($"[CoreComposer] Escadre {destroyedEscadre.Id} for Client {clientConnection.ClientId} was removed/destroyed. Setting ClientConnection state to Destroyed.");
+                        // It's important this SetState to Destroyed happens *before* any UnregisterClient call for this client,
+                        // or that UnregisterClient doesn't try to re-kill the already dead escadre.
+                        // The Escadre is already dead and removed from the level.
+                        // We just need to update the ClientConnection's state.
+                        // UnregisterClient also handles PVS removal etc., which might be desired.
+                        // For now, let's just set the state. If full unregistration is needed, that's a different path.
+                        clientConnection.SetState(ClientState.Destroyed);
+                        // Consider if full UnregisterClient(clientConnection.ClientId) should be called here.
+                        // If so, ensure UnregisterClient handles a null/already-dead EscadreEntity gracefully.
+                        // For now, simply setting state to Destroyed might be enough to stop further interactions.
+                        // UnregisterClient also removes the client from _clientConnections, which might be too much if they could e.g. respawn.
+                        // If a client whose escadre is destroyed should be fully disconnected, then call UnregisterClient.
+                        // Let's assume for now that their connection persists but is marked as Destroyed.
+                    }
+                    else if (clientConnection.CurrentState == ClientState.Destroyed)
+                    {
+                        Logger.Log($"[CoreComposer] Escadre {destroyedEscadre.Id} for Client {clientConnection.ClientId} was removed, but client already in Destroyed state.");
+                    }
+                    else if (clientConnection.EscadreEntity != destroyedEscadre)
+                    {
+                         Logger.LogWarning($"[CoreComposer] Escadre {destroyedEscadre.Id} removed, but Client {clientConnection.ClientId} is associated with a different Escadre Entity ({clientConnection.EscadreEntity?.Id}). No state change for client.");
+                    }
+                }
+                else
+                {
+                    // This could happen if an Escadre is destroyed for a client that already disconnected
+                    Logger.Log($"[CoreComposer] Escadre Entity ID {destroyedEscadre.Id} (Owner: {destroyedEscadre.OwnerClientId}) removed, but no active client connection found for this owner.");
+                }
+            }
         }
 
         private void HandleNetworkMessage_SessionManagement(int sourceNetworkId, int entityIdContext, MessageType messageType, BinaryReader reader)
@@ -241,6 +288,12 @@ namespace Core
         {
             if (_isDisposed) return; _isDisposed = true;
             Logger.Log("[CoreComposer] Disposing...");
+
+            // Unsubscribe from ServerLevel events
+            if (ServerLevel != null)
+            {
+                ServerLevel.OnEntityRemovedEvent -= HandleEntityRemoved;
+            }
 
             if (_networkLayer != null)
             {

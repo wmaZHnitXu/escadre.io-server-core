@@ -2,7 +2,8 @@
 using System.Collections.Generic;
 using Core.Logging;
 using Core.Model;
-using System.Linq; // Required for .Any() and .OfType<T>()
+using System.Linq;
+using System; // Required for .Any() and .OfType<T>()
 
 namespace Core.Model
 {
@@ -19,6 +20,9 @@ namespace Core.Model
 
         public delegate void OnEntityAdded(Entity entity);
         public event OnEntityAdded OnEntityAddedEvent;
+
+        // Event raised when an entity is definitively removed from the level's active list
+        public event Action<Entity> OnEntityRemovedEvent;
 
         private float _currentTime = 0f;
         public float CurrentTime => _currentTime;
@@ -184,7 +188,11 @@ namespace Core.Model
             foreach (Entity entity in _toRemove)
             {
                 entity.OnDeathEvent -= HandleEntityDeathForLevelCleanup; 
-                _entities.Remove(entity); 
+                bool removed = _entities.Remove(entity); 
+                if (removed) // Only invoke if it was actually in the list and removed
+                {
+                    OnEntityRemovedEvent?.Invoke(entity); 
+                }
                 _idsFreed.Enqueue(entity.Id); 
             }
             _toRemove.Clear();
