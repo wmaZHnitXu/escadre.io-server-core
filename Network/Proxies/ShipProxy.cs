@@ -34,7 +34,7 @@ namespace Core.Network.Proxies
             }
             protected override void SerializeSpecificCorrectionState(BinaryWriter writer) {
                 base.SerializeSpecificCorrectionState(writer);
-                writer.Write(_entity.CurrentSpeed); // Server's current actual speed
+                writer.Write(_entity.CurrentSpeed); 
                 writer.Write(_entity.MaxSpeed); writer.Write(_entity.TurnRate); writer.Write(_entity.AttackDamage);
                 writer.Write(_entity.AttackRange); writer.Write(_entity.AttackCooldown);
             }
@@ -60,9 +60,10 @@ namespace Core.Network.Proxies
                     if (hasTarget) {
                         SerializationUtils.WriteVector2(writer, newTarget.Value);
                     }
-                    SerializationUtils.WriteVector3(writer, _entity.Position);
-                    SerializationUtils.WriteQuaternion(writer, _entity.Rotation);
-                    writer.Write(serverTime);
+                    SerializationUtils.WriteVector3(writer, _entity.Position); // Server pos at command
+                    SerializationUtils.WriteQuaternion(writer, _entity.Rotation); // Server rot at command
+                    writer.Write(_entity.CurrentSpeed); // Server speed at command
+                    writer.Write(serverTime); // Server time of command
                 });
             }
         }
@@ -82,7 +83,6 @@ namespace Core.Network.Proxies
             private Vector2? _currentMovementTarget;
             private bool _isMovingClientSide = false; 
 
-            // Constructor updated
             public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType, ClientLevel clientLevel)
                 : base(entityId, concreteType, clientLevel) { }
 
@@ -102,12 +102,16 @@ namespace Core.Network.Proxies
                 base.DeserializeSpecificState(reader); 
                 
                 float serverAuthoritativeSpeed = reader.ReadSingle(); 
+                // If we are doing full state correction, we might snap _clientSimulatedSpeed too.
+                // For now, this is mainly for full stat overrides (e.g. after upgrade)
+                // If Math.Abs(_clientSimulatedSpeed - serverAuthoritativeSpeed) > some_threshold then adjust.
+                // However, this can cause jitter if server speed fluctuates differently than client prediction.
 
                 var oldMaxSpeed = MaxSpeed;
                 MaxSpeed = reader.ReadSingle(); TurnRate = reader.ReadSingle();
                 AttackDamage = reader.ReadSingle(); AttackRange = reader.ReadSingle();
                 AttackCooldown = reader.ReadSingle();
-                if (Math.Abs(MaxSpeed - oldMaxSpeed) > float.Epsilon /* || other stats */) {
+                if (Math.Abs(MaxSpeed - oldMaxSpeed) > float.Epsilon /* || other stats changed significantly */) {
                     StatsChanged?.Invoke();
                 }
             }
@@ -128,6 +132,7 @@ namespace Core.Network.Proxies
                     }
                 }
                 else {
+                    // Pass to base if this proxy doesn't handle it (e.g. DestructibleEntity events)
                     base.HandleSpecificEvent(specificEventType, reader); 
                 }
             }
@@ -139,65 +144,128 @@ namespace Core.Network.Proxies
                 
                 Vector3 serverPosAtCommand = SerializationUtils.ReadVector3(reader);
                 Quaternion serverRotAtCommand = SerializationUtils.ReadQuaternion(reader);
+                float serverSpeedAtCommand = reader.ReadSingle();
                 float serverTimeOfCommand = reader.ReadSingle(); 
 
-                SetSimulatedPositionAndRotation(serverPosAtCommand, serverRotAtCommand); 
-                
-                _isMovingClientSide = hasTarget;
+                float clientTimeNow = OwningClientLevel.CurrentTime;
+                float catchUpDeltaTime = clientTimeNow - serverTimeOfCommand;
 
-                if (!_isMovingClientSide) { 
-                    if (Math.Abs(_clientSimulatedSpeed) > float.Epsilon) {
-                        _clientSimulatedSpeed = 0f; CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
-                    }
-                }
-                // Can use OwningClientLevel.CurrentTime here if needed to compare against serverTimeOfCommand for advanced prediction.
-                // Logger.Log($"[ShipProxy.Client {EntityId}] Rcvd SetMovementTarget Event. Target: {_currentMovementTarget?.ToString() ?? "None"}. Snapped to server state: Pos={serverPosAtCommand}, Rot={serverRotAtCommand} @ ServerTime={serverTimeOfCommand}. ClientTime: {OwningClientLevel.CurrentTime}");
-            }
+                Vector3 predictedPos = serverPosAtCommand;
+                Quaternion predictedRot = serverRotAtCommand;
+                float predictedSpeed = serverSpeedAtCommand;
+                bool stillMovingAfterCatchUp = hasTarget;
 
-            // Update signature changed
-            public override void Update(float deltaTime)
-            {
-                base.Update(deltaTime); 
-                if (deltaTime <= 0f || !_isMovingClientSide || !_currentMovementTarget.HasValue)
+                if (catchUpDeltaTime > 0.001f && _currentMovementTarget.HasValue) // Only catch up if time has passed and there's a target
                 {
-                    if (Math.Abs(_clientSimulatedSpeed) > float.Epsilon && !_isMovingClientSide)
-                    {
-                        _clientSimulatedSpeed = 0f;
-                        CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
-                    }
-                    return;
+                    // Simulate movement for the catchUpDeltaTime
+                    // To avoid duplicating logic, we can call a helper or a stripped-down version of UpdateMovement
+                    // For simplicity here, let's assume a single step catch-up.
+                    // A more accurate catch-up might involve multiple small steps if catchUpDeltaTime is large.
+                    var catchUpResult = SimulateMovementStep(
+                        serverPosAtCommand, serverRotAtCommand, serverSpeedAtCommand,
+                        _currentMovementTarget, MaxSpeed, TurnRate, catchUpDeltaTime, true // Assume wants to move
+                    );
+                    predictedPos = catchUpResult.newPos;
+                    predictedRot = catchUpResult.newRot;
+                    predictedSpeed = catchUpResult.newSpeed;
+                    stillMovingAfterCatchUp = catchUpResult.stillMoving;
                 }
 
-                Vector3 currentSimPos = _simulatedPosition; 
-                Quaternion currentSimRot = _simulatedRotation;
-                float currentSimSpeed = _clientSimulatedSpeed;
+                SetSimulatedPositionAndRotation(predictedPos, predictedRot);
+                if (Math.Abs(_clientSimulatedSpeed - predictedSpeed) > float.Epsilon)
+                {
+                    _clientSimulatedSpeed = predictedSpeed;
+                    CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
+                }
+                
+                _isMovingClientSide = stillMovingAfterCatchUp && hasTarget; // If catch-up reached target, stop
+                if (!_isMovingClientSide) _currentMovementTarget = null;
 
-                Vector2 currentPos2D = new Vector2(currentSimPos.X, currentSimPos.Z);
-                Vector2 targetPos2D = _currentMovementTarget.Value;
+
+                // Logger.Log($"[ShipProxy.Client {EntityId}] Rcvd SetMovementTarget. Target: {_currentMovementTarget?.ToString() ?? "None"}. ServerTime: {serverTimeOfCommand}, ClientTime: {clientTimeNow}, CatchUpDT: {catchUpDeltaTime}. Snapped/Predicted to Pos={predictedPos}, Rot={predictedRot}, Spd={predictedSpeed}");
+            }
+            
+            /// <summary>
+            /// Simulates one step of movement.
+            /// </summary>
+            /// <returns>Tuple of newPos, newRot, newSpeed, stillMoving</returns>
+            private (Vector3 newPos, Quaternion newRot, float newSpeed, bool stillMoving) SimulateMovementStep(
+                Vector3 currentPosition, Quaternion currentRotation, float currentSpeedParam,
+                Vector2? target, float currentMaxSpeed, float currentTurnRate, float deltaTime, bool hasExternalMoveOrder)
+            {
+                Vector3 nextPos = currentPosition;
+                Quaternion nextRot = currentRotation;
+                float nextSpeed = currentSpeedParam;
+                bool stillNeedsToMove = hasExternalMoveOrder;
+
+                if (!hasExternalMoveOrder || !target.HasValue)
+                {
+                    if (nextSpeed > 0) nextSpeed = Math.Max(0, nextSpeed - (currentMaxSpeed * 2f * deltaTime)); // Decelerate
+                    else nextSpeed = 0f;
+                    stillNeedsToMove = false;
+                    return (nextPos, nextRot, nextSpeed, stillNeedsToMove);
+                }
+
+                Vector2 currentPos2D = new Vector2(currentPosition.X, currentPosition.Z);
+                Vector2 targetPos2D = target.Value;
                 Vector2 toTarget = targetPos2D - currentPos2D;
 
-                if (toTarget.SqrMagnitude < 0.01f * 0.01f) { 
-                    currentSimPos = new Vector3(targetPos2D.X, currentSimPos.Y, targetPos2D.Y);
-                    _isMovingClientSide = false;
-                    _currentMovementTarget = null;
-                    currentSimSpeed = 0f;
-                } else {
-                    currentSimSpeed = this.MaxSpeed;
+                float distanceToTargetSq = toTarget.SqrMagnitude;
+                
+                // Adjusted stopping condition: try to match server's dynamic threshold principle
+                float speedForStoppingCalc = currentMaxSpeed; // Use MaxSpeed for threshold calculation
+                float stoppingDistance = speedForStoppingCalc * deltaTime * 0.75f; // A bit more generous factor for client
+                float stoppingDistanceSq = stoppingDistance * stoppingDistance;
+                stoppingDistanceSq = Math.Max(0.01f * 0.01f, stoppingDistanceSq); // Min threshold
+
+                if (distanceToTargetSq < stoppingDistanceSq)
+                {
+                    nextPos = new Vector3(targetPos2D.X, currentPosition.Y, targetPos2D.Y); // Snap to target XZ
+                    nextSpeed = 0f;
+                    stillNeedsToMove = false;
+                }
+                else
+                {
+                    if (nextSpeed < currentMaxSpeed) nextSpeed = Math.Min(currentMaxSpeed, nextSpeed + (currentMaxSpeed * 1.0f * deltaTime));
+                    else nextSpeed = currentMaxSpeed;
+
                     Vector2 directionToTarget = toTarget.Normalized;
                     Vector3 targetForward = new Vector3(directionToTarget.X, 0, directionToTarget.Y);
 
-                    if (targetForward.SqrMagnitude > Vector3.Epsilon) {
+                    if (targetForward.SqrMagnitude > Vector3.Epsilon)
+                    {
                         Quaternion desiredRotation = Quaternion.LookRotation(targetForward, Vector3.Up);
-                        currentSimRot = Quaternion.RotateTowards(currentSimRot, desiredRotation, this.TurnRate * deltaTime);
+                        nextRot = Quaternion.RotateTowards(currentRotation, desiredRotation, currentTurnRate * deltaTime);
                     }
-                    Vector3 velocity = currentSimRot * Vector3.Forward * currentSimSpeed * deltaTime;
-                    currentSimPos += velocity;
+                    Vector3 velocity = nextRot * Vector3.Forward * nextSpeed * deltaTime;
+                    nextPos += velocity;
                 }
+                return (nextPos, nextRot, nextSpeed, stillNeedsToMove);
+            }
 
-                SetSimulatedPositionAndRotation(currentSimPos, currentSimRot);
-                if (Math.Abs(_clientSimulatedSpeed - currentSimSpeed) > float.Epsilon) {
-                    _clientSimulatedSpeed = currentSimSpeed;
+
+            public override void Update(float deltaTime)
+            {
+                base.Update(deltaTime); 
+                if (deltaTime <= 0f) return;
+
+                var result = SimulateMovementStep(
+                    _simulatedPosition, _simulatedRotation, _clientSimulatedSpeed,
+                    _currentMovementTarget, this.MaxSpeed, this.TurnRate, deltaTime, _isMovingClientSide
+                );
+
+                SetSimulatedPositionAndRotation(result.newPos, result.newRot);
+                if (Math.Abs(_clientSimulatedSpeed - result.newSpeed) > float.Epsilon)
+                {
+                    _clientSimulatedSpeed = result.newSpeed;
                     CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
+                }
+                
+                _isMovingClientSide = result.stillMoving;
+                if (!_isMovingClientSide && _currentMovementTarget.HasValue) // If simulation stopped it, clear target
+                {
+                    _currentMovementTarget = null; 
+                    // Logger.Log($"[ShipProxy.Client {EntityId}] Movement target reached/cleared by simulation step.");
                 }
             }
 

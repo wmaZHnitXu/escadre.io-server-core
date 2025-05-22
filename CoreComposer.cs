@@ -28,8 +28,6 @@ namespace Core
         private readonly Dictionary<int, ClientConnection> _clientConnections = new Dictionary<int, ClientConnection>();
         public IReadOnlyDictionary<int, ClientConnection> ClientConnections => _clientConnections;
         
-        // For MockNetworkLayer to map sourceNetworkId to gameClientId for disconnects
-        // In a real system, the network layer (e.g. SignalR hub) would provide this mapping via its connection context.
         private readonly Dictionary<int, int> _sourceNetworkIdToGameClientIdMap = new Dictionary<int, int>();
         private readonly Dictionary<int, int> _gameClientIdToSourceNetworkIdMap = new Dictionary<int, int>();
 
@@ -49,9 +47,9 @@ namespace Core
 
             Logger.Log("[CoreComposer] Initializing Core Systems...");
 
-            ServerLevel = new Level();
+            ServerLevel = new Level(); 
             VisibilityManager = new VisibilityManager(_visibilityStrategy);
-            _replicationManager = new ServerReplicationManager(ServerLevel, _networkLayer, VisibilityManager, _clientConnections, _serverClock);
+            _replicationManager = new ServerReplicationManager(ServerLevel, _networkLayer, VisibilityManager, _clientConnections, _serverClock, this); 
             
             _networkLayer.OnClientMessageReceived += HandleNetworkMessage_SessionManagement;
 
@@ -79,9 +77,9 @@ namespace Core
                     if (_sourceNetworkIdToGameClientIdMap.ContainsKey(sourceNetworkId))
                     {
                         Logger.LogWarning($"[CoreComposer] Network Source ID {sourceNetworkId} is already associated with game client {_sourceNetworkIdToGameClientIdMap[sourceNetworkId]}. New connect request from same source for different/new identity {validatedIdentity.ClientId} - this might indicate a client bug or reconnect attempt not fully handled. Overwriting mapping for now.");
-                        // Clean up old mapping if sourceNetworkId is being reused by a "new" client identity
                         int oldGameId = _sourceNetworkIdToGameClientIdMap[sourceNetworkId];
-                        _gameClientIdToSourceNetworkIdMap.Remove(oldGameId);
+                        if(_clientConnections.ContainsKey(oldGameId)) UnregisterClient(oldGameId); 
+                        else { _gameClientIdToSourceNetworkIdMap.Remove(oldGameId); _sourceNetworkIdToGameClientIdMap.Remove(sourceNetworkId); } 
                     }
 
 
@@ -90,8 +88,8 @@ namespace Core
                     float pvsRadius = 150f; 
                     if (validatedIdentity.IsAdmin) pvsRadius = 300f; 
 
-                    float x = (validatedIdentity.ClientId % 7) * 15f - 45f; 
-                    float z = ((validatedIdentity.ClientId / 7) % 7) * 15f - 45f;
+                    float x = (validatedIdentity.ClientId % 7) * 25f - 75f; 
+                    float z = ((validatedIdentity.ClientId / 7) % 7) * 25f - 75f;
                     Vector3 spawnPosition = new Vector3(x, 0, z);
                     
                     CreateClientSessionAndEscadre(validatedIdentity, pvsRadius, spawnPosition, sourceNetworkId);
@@ -124,12 +122,20 @@ namespace Core
                 return _clientConnections[identity.ClientId]; 
             }
 
-            // Map sourceNetworkId to gameClientId for session management
+            // ** STEP 1: Establish Mappings **
             _sourceNetworkIdToGameClientIdMap[sourceNetworkId] = identity.ClientId;
             _gameClientIdToSourceNetworkIdMap[identity.ClientId] = sourceNetworkId;
+            
+            // ** STEP 2: Inform MockNetworkLayer about the mapping for S->C message routing **
+            // This MUST happen BEFORE any S->C messages are sent using the gameClientId.
+            if (_networkLayer is MockNetworkLayer mockLayer)
+            {
+                mockLayer.MapNetworkSourceToClientId(sourceNetworkId, identity.ClientId);
+                Logger.Log($"[CoreComposer] MockNetworkLayer mapping established for GameClient {identity.ClientId} <-> NetworkSource {sourceNetworkId}.");
+            }
 
-
-            var clientConnection = new ClientConnection(identity.ClientId, initialPvsRadius); 
+            // ** STEP 3: Create ClientConnection and Escadre **
+            var clientConnection = new ClientConnection(identity.ClientId, ServerLevel, initialPvsRadius); 
             _clientConnections.Add(identity.ClientId, clientConnection); 
             VisibilityManager.AddOrUpdateClientView(clientConnection);
 
@@ -141,27 +147,24 @@ namespace Core
                 _clientConnections.Remove(identity.ClientId); 
                 _sourceNetworkIdToGameClientIdMap.Remove(sourceNetworkId);
                 _gameClientIdToSourceNetworkIdMap.Remove(identity.ClientId);
+                if (_networkLayer is MockNetworkLayer mockLayerCleanup) // Clean up mapping if session creation failed
+                {
+                    mockLayerCleanup.RemoveNetworkSourceMappingForClientId(identity.ClientId);
+                }
                 return null;
             }
             clientConnection.AssignEscadre(escadre);
             
             Ship initialShip = new DefaultShip(ServerLevel, escadre, initialSpawnPosition);
             escadre.AddShip(initialShip); 
-            if (escadre.CurrentDestination.HasValue)
-            {
-                initialShip.SetMovementTarget(escadre.CurrentDestination.Value, _serverClock.CurrentTime);
-            }
+            escadre.UpdateShipMovementTargets(_serverClock.CurrentTime);
+
 
             Logger.Log($"[CoreComposer] Client Session Created & Registered: ID={identity.ClientId}, Nick='{identity.Nickname}', Admin={identity.IsAdmin}, AuthType={identity.AuthType}. Mapped to NetworkSourceID: {sourceNetworkId}.");
 
+            // ** STEP 4: NOW invoke ClientRegisteredEvent, after network mapping is ready **
             ClientRegisteredEvent?.Invoke(clientConnection); 
             
-            if (_networkLayer is MockNetworkLayer mockLayer)
-            {
-                // This call tells the mock layer how to route S->C messages for this gameClientId
-                mockLayer.MapNetworkSourceToClientId(sourceNetworkId, identity.ClientId);
-            }
-
             return clientConnection;
         }
 
@@ -173,18 +176,18 @@ namespace Core
                 Logger.Log($"[CoreComposer] Unregistering Game Client ID {gameClientId}.");
                 ClientConnection tempConnectionReference = clientConnection; 
 
-                // Clean up sourceNetworkId mapping
+                // Fire event first, so SRM can stop its EscadreProxy *before* we potentially tear down the EscadreInstance
+                ClientUnregisteredEvent?.Invoke(tempConnectionReference); 
+
                 if (_gameClientIdToSourceNetworkIdMap.TryGetValue(gameClientId, out int sourceNetworkId))
                 {
                     _sourceNetworkIdToGameClientIdMap.Remove(sourceNetworkId);
                     _gameClientIdToSourceNetworkIdMap.Remove(gameClientId);
                     Logger.Log($"[CoreComposer] Removed mapping for Game Client ID {gameClientId} (was Network Source ID {sourceNetworkId}).");
                     
-                    // Also inform MockNetworkLayer if it's being used, so it can clear its internal routing for the source ID
                     if (_networkLayer is MockNetworkLayer mockLayer)
                     {
-                        mockLayer.RemoveNetworkSourceMappingForClientId(gameClientId); // This might be redundant if MapNetworkSourceToClientId implies registration
-                        // mockLayer.UnregisterMockClientS2CRouting(sourceNetworkId); // This should be called by ClientComposer's OnDisable
+                        mockLayer.RemoveNetworkSourceMappingForClientId(gameClientId); 
                     }
                 }
                 else { Logger.LogWarning($"[CoreComposer] No sourceNetworkId mapping found for Game Client ID {gameClientId} during unregistration."); }
@@ -199,8 +202,6 @@ namespace Core
                 clientConnection.ClearEscadreReference(); 
                 clientConnection.SetState(ClientState.Destroyed); 
                 _clientConnections.Remove(gameClientId);
-
-                ClientUnregisteredEvent?.Invoke(tempConnectionReference); 
             } else { Logger.LogWarning($"[CoreComposer] Attempted to unregister unknown client: {gameClientId}"); }
         }
 
@@ -209,8 +210,8 @@ namespace Core
             if (_isDisposed) return;
             try
             {
-                ServerLevel.DoUpdate(deltaTime);
-                foreach (var entity in ServerLevel.GetAllEntities())
+                ServerLevel.DoUpdate(deltaTime); 
+                foreach (var entity in ServerLevel.GetAllEntities()) 
                 {
                     VisibilityManager.RegisterEntity(entity); 
                 }
@@ -242,9 +243,9 @@ namespace Core
             _sourceNetworkIdToGameClientIdMap.Clear();
             _gameClientIdToSourceNetworkIdMap.Clear();
 
-            _replicationManager?.Dispose();
+            _replicationManager?.Dispose(); 
             VisibilityManager?.Dispose();
-            ServerLevel?.Destroy();
+            ServerLevel?.Destroy(); 
             _visibilityStrategy?.Dispose();
 
             ClientRegisteredEvent = null;

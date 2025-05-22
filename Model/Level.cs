@@ -1,5 +1,8 @@
+// File: Core/Model/Level.cs
 using System.Collections.Generic;
 using Core.Logging;
+using Core.Model;
+using System.Linq; // Required for .Any()
 
 namespace Core.Model
 {
@@ -12,20 +15,46 @@ namespace Core.Model
         private int _maxIdAllocated = 0;
 
         private Dictionary<int, Escadre> _escadresByOwnerId = new ();
+        public Shop GameShop { get; private set; } 
 
         public delegate void OnEntityAdded(Entity entity);
         public event OnEntityAdded OnEntityAddedEvent;
 
+        private float _currentTime = 0f;
+        public float CurrentTime => _currentTime;
+
+
         public Level()
         {
             _entities = new List<Entity>();
+            InitializeShop(); 
         }
+
+        private void InitializeShop()
+        {
+            var designs = new List<ShipDesign>
+            {
+                new ShipDesign(1, "Default Light Ship", 100, Entity.EntityTypeEnum.DefaultShip),
+            };
+            GameShop = new Shop(designs);
+            Logger.Log("[Level] GameShop initialized with default designs.");
+        }
+
 
         public void DoUpdate(float delta)
         {
-            foreach (Entity entity in _entities)
+            _currentTime += delta;
+
+            // Update individual entities (ships, projectiles, etc.)
+            foreach (Entity entity in _entities) // Iterate a copy if modification during iteration is possible
             {
                 entity.Update(delta);
+            }
+
+            // Update escadres (for formation anchor movement, etc.)
+            foreach(var escadre in _escadresByOwnerId.Values)
+            {
+                escadre.Update(delta, _currentTime); // Pass serverTime
             }
 
             RemoveRemovedEntities();
@@ -49,6 +78,16 @@ namespace Core.Model
             {
                 entity.Kill(true);
             }
+            var escadreOwners = new List<int>(_escadresByOwnerId.Keys);
+            foreach(var ownerId in escadreOwners)
+            {
+                if (_escadresByOwnerId.TryGetValue(ownerId, out var escadre))
+                {
+                    escadre.Disband(true); 
+                }
+                RemoveEscadre(ownerId); 
+            }
+             _escadresByOwnerId.Clear(); 
         }
 
         public IEnumerable<Entity> GetAllEntities() {
@@ -74,7 +113,6 @@ namespace Core.Model
                 return false;
             }
             _escadresByOwnerId.Add(escadre.OwnerClientId, escadre);
-            // if (!_activeEscadres.Contains(escadre)) _activeEscadres.Add(escadre); // If using list
             Logger.Log($"[Level] Added Escadre for Client {escadre.OwnerClientId}.");
             return true;
         }
@@ -83,7 +121,7 @@ namespace Core.Model
         {
             return _escadresByOwnerId.TryGetValue(ownerClientId, out escadre);
         }
-        public IEnumerable<Escadre> GetAllEscadres() // For iterating all escadres if needed
+        public IEnumerable<Escadre> GetAllEscadres()
         {
             return _escadresByOwnerId.Values;
         }
@@ -92,7 +130,6 @@ namespace Core.Model
         {
             if (_escadresByOwnerId.Remove(ownerClientId, out Escadre escadre))
             {
-                // if (_activeEscadres.Contains(escadre)) _activeEscadres.Remove(escadre); // If using list
                 Logger.Log($"[Level] Removed Escadre for Client {ownerClientId}.");
                 return true;
             }
@@ -102,27 +139,37 @@ namespace Core.Model
 
         protected void AddAddedEntities()
         {
+            if (!_toAdd.Any()) return;
+
             foreach (Entity entity in _toAdd)
             {
-                if (entity.IsDead)
+                if (entity.IsDead) 
                 {
-                    _idsFreed.Enqueue(entity.Id);
+                    _idsFreed.Enqueue(entity.Id); 
                     continue;
                 }
                 _entities.Add(entity);
-                entity.OnDeathEvent += RemoveEntity;
-                OnEntityAddedEvent(entity);
+                entity.OnDeathEvent += HandleEntityDeathForLevelCleanup; 
+                OnEntityAddedEvent?.Invoke(entity); 
             }
             _toAdd.Clear();
         }
+        
+        private void HandleEntityDeathForLevelCleanup(Entity entity)
+        {
+            RemoveEntity(entity);
+        }
+
 
         protected void RemoveRemovedEntities()
         {
+            if (!_toRemove.Any()) return;
+
             foreach (Entity entity in _toRemove)
             {
-                entity.OnDeathEvent -= RemoveEntity;
-                _entities.Remove(entity);
-                _idsFreed.Enqueue(entity.Id);
+                entity.OnDeathEvent -= HandleEntityDeathForLevelCleanup; 
+                _entities.Remove(entity); 
+                _idsFreed.Enqueue(entity.Id); 
             }
             _toRemove.Clear();
         }
