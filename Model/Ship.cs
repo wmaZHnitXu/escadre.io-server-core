@@ -3,6 +3,7 @@ using System;
 using Core.Primitives;
 using Core.Logging;
 using System.Linq;
+using System.Collections.Generic; // Added for List<DefaultCannon>
 
 namespace Core.Model
 {
@@ -15,15 +16,13 @@ namespace Core.Model
         public bool IsMoving { get; protected set; }
 
         public abstract float MaxSpeed { get; protected set; }
-        public abstract float TurnRate { get; protected set; } 
-        public abstract float AttackDamage { get; protected set; }
-        public abstract float AttackRange { get; protected set; }
-        public abstract float AttackCooldown { get; protected set; }
+        public abstract float TurnRate { get; protected set; }
         
         private Vector2? _movementTargetPosition; 
         public event Action<Ship, Vector2?, float> OnMovementTargetProgrammed; 
 
-        protected float _currentAttackCooldownTimer;
+        protected readonly List<DefaultCannon> _cannons = new List<DefaultCannon>();
+        public IReadOnlyList<DefaultCannon> Cannons => _cannons.AsReadOnly();
 
         protected Ship(Level level, Escadre ownerEscadre, Vector3 initialPosition, float maxHealth)
             : base(level, maxHealth)
@@ -34,7 +33,6 @@ namespace Core.Model
             Rotation = Quaternion.Identity; 
             IsMoving = false;
             CurrentSpeed = 0f;
-            _currentAttackCooldownTimer = 0f;
         }
 
         public override void Update(float delta)
@@ -44,7 +42,6 @@ namespace Core.Model
             if (IsDead) return;
 
             UpdateMovement(delta);
-            UpdateAttack(delta);
         }
 
         public void SetMovementTarget(Vector2? targetWorldPosition, float serverTime)
@@ -122,76 +119,6 @@ namespace Core.Model
             Position += velocity;
         }
 
-        protected virtual void UpdateAttack(float deltaTime)
-        {
-            if (_currentAttackCooldownTimer > 0)
-            {
-                _currentAttackCooldownTimer -= deltaTime;
-            }
-
-            if (IsDead || _currentAttackCooldownTimer > 0 || OwningEscadre == null || OwningEscadre.IsDead) return;
-
-            // Use TargetEscadreEntityIds from the OwningEscadre Entity
-            if (!OwningEscadre.TargetEscadreEntityIds.Any()) return;
-
-            Ship targetShip = FindBestTarget();
-
-            if (targetShip != null)
-            {
-                PerformAttackOn(targetShip);
-                _currentAttackCooldownTimer = AttackCooldown;
-            }
-        }
-
-        protected Ship FindBestTarget()
-        {
-            if (OwningEscadre == null || OwningEscadre.IsDead) return null;
-
-            Ship bestTarget = null;
-            float closestDistSq = AttackRange * AttackRange;
-
-            // Iterate through the target Escadre Entity IDs stored in the OwningEscadre
-            foreach (int targetEscadreEntityId in OwningEscadre.TargetEscadreEntityIds)
-            {
-                if (_level.TryGetEntity(targetEscadreEntityId, out Entity targetEntity) && targetEntity is Escadre targetEscadre && !targetEscadre.IsDead)
-                {
-                    foreach (int enemyShipId in targetEscadre.ShipEntityIds)
-                    {
-                        if (_level.TryGetEntity(enemyShipId, out Entity enemyEntity) && enemyEntity is Ship enemyShip && !enemyShip.IsDead)
-                        {
-                            float distSq = (enemyShip.Position - Position).SqrMagnitude;
-                            if (distSq <= closestDistSq)
-                            {
-                                // TODO: Line of Sight Check
-                                closestDistSq = distSq;
-                                bestTarget = enemyShip;
-                            }
-                        }
-                    }
-                }
-                // If a primary target escadre yields a bestTarget, we can break early or continue searching other target escadres.
-                // For simplicity, let's assume the first target escadre in the list is prioritized.
-                // If we want to pick the absolute closest ship from *any* targeted escadre, remove this 'if bestTarget != null break;'
-                if (bestTarget != null) break; 
-            }
-            return bestTarget;
-        }
-
-        protected virtual void PerformAttackOn(Ship target)
-        {
-            Logger.Log($"[Ship {Id}] Attacking Ship {target.Id} of client {target.OwningEscadreClientId} (Escadre Entity: {target.OwningEscadre.Id}).");
-            DamageInfo damage = new DamageInfo(
-                AttackDamage,
-                DamageType.Kinetic,
-                target.Position, 
-                (target.Position - Position).Normalized, 
-                this.Id,
-                this.OwningEscadreClientId
-            );
-            target.ApplyDamage(damage);
-        }
-        
-        // Override Entity.Death() for specific Ship death behavior
         protected override void Death()
         {
             base.Death(); // Call base DestructibleEntity.Death
@@ -201,19 +128,32 @@ namespace Core.Model
             {
                 OwningEscadre.HandleShipDestroyed(this.Id);
             }
-            Logger.Log($"[Ship {Id}] Ship Death() processed. Notified Escadre {OwningEscadre?.Id}.");
+            Logger.Log($"[Ship {Id}] Ship Death() processed. Notified Escadre {OwningEscadre?.Id}. An additional call to kill cannons will be made in ObligatoryOnRemove.");
         }
 
         public virtual void PerformUpgrade()
         {
             Logger.Log($"[Ship {Id}] Base PerformUpgrade called. No changes by default.");
             // Derived classes will implement specific stat changes.
+            // Upgrading cannons would happen here too, e.g. by iterating _cannons list.
         }
 
         protected override void ObligatoryOnRemove()
         {
             base.ObligatoryOnRemove();
             OnMovementTargetProgrammed = null; // Clear events
+            
+            // Kill all attached cannons when the ship is removed
+            // Create a copy of the list for safe iteration if Kill() modifies the collection indirectly.
+            var cannonsToKill = new List<DefaultCannon>(_cannons);
+            foreach (var cannon in cannonsToKill)
+            {
+                if (cannon != null && !cannon.IsDead)
+                {
+                    cannon.Kill(true); // Kill silently as the ship's removal is the primary event
+                }
+            }
+            _cannons.Clear();
             // The OwningEscadre will handle removing this ship from its lists when the ship dies.
         }
     }

@@ -23,20 +23,20 @@ namespace Core.Network.Proxies
 
             protected override float CalculateChecksum() {
                 int baseHash = base.CalculateChecksum().GetHashCode();
-                return HashCode.Combine(baseHash, _entity.CurrentSpeed.GetHashCode(), _entity.MaxSpeed.GetHashCode(), _entity.AttackRange.GetHashCode());
+                return HashCode.Combine(baseHash, _entity.CurrentSpeed.GetHashCode(), _entity.MaxSpeed.GetHashCode());
             }
             public override void SerializeSpecificInitialState(BinaryWriter writer) {
                 base.SerializeSpecificInitialState(writer);
                 writer.Write(_entity.OwningEscadreClientId);
                 writer.Write(_entity.CurrentSpeed);
-                writer.Write(_entity.MaxSpeed); writer.Write(_entity.TurnRate); writer.Write(_entity.AttackDamage);
-                writer.Write(_entity.AttackRange); writer.Write(_entity.AttackCooldown);
+                writer.Write(_entity.MaxSpeed); 
+                writer.Write(_entity.TurnRate); 
             }
             protected override void SerializeSpecificCorrectionState(BinaryWriter writer) {
                 base.SerializeSpecificCorrectionState(writer);
                 writer.Write(_entity.CurrentSpeed); 
-                writer.Write(_entity.MaxSpeed); writer.Write(_entity.TurnRate); writer.Write(_entity.AttackDamage);
-                writer.Write(_entity.AttackRange); writer.Write(_entity.AttackCooldown);
+                writer.Write(_entity.MaxSpeed); 
+                writer.Write(_entity.TurnRate); 
             }
 
             protected override void StartReplicatingInternal() {
@@ -60,10 +60,10 @@ namespace Core.Network.Proxies
                     if (hasTarget) {
                         SerializationUtils.WriteVector2(writer, newTarget.Value);
                     }
-                    SerializationUtils.WriteVector3(writer, _entity.Position); // Server pos at command
-                    SerializationUtils.WriteQuaternion(writer, _entity.Rotation); // Server rot at command
-                    writer.Write(_entity.CurrentSpeed); // Server speed at command
-                    writer.Write(serverTime); // Server time of command
+                    SerializationUtils.WriteVector3(writer, _entity.Position); 
+                    SerializationUtils.WriteQuaternion(writer, _entity.Rotation); 
+                    writer.Write(_entity.CurrentSpeed); 
+                    writer.Write(serverTime); 
                 });
             }
         }
@@ -75,10 +75,9 @@ namespace Core.Network.Proxies
             public float ClientSimulatedSpeed => _clientSimulatedSpeed; 
             public event Action<float> CurrentSpeedChanged;
 
-            public float MaxSpeed { get; private set; } public float TurnRate { get; private set; }
-            public float AttackDamage { get; private set; } public float AttackRange { get; private set; }
-            public float AttackCooldown { get; private set; }
-            public event Action StatsChanged;
+            public float MaxSpeed { get; private set; } 
+            public float TurnRate { get; private set; }
+            public event Action StatsChanged; // Still useful for MaxSpeed, TurnRate
 
             private Vector2? _currentMovementTarget;
             private bool _isMovingClientSide = false; 
@@ -90,28 +89,24 @@ namespace Core.Network.Proxies
                 base.DeserializeSpecificInitialState(reader); 
                 OwningEscadreClientId = reader.ReadInt32();
                 _clientSimulatedSpeed = reader.ReadSingle(); 
-                MaxSpeed = reader.ReadSingle(); TurnRate = reader.ReadSingle();
-                AttackDamage = reader.ReadSingle(); AttackRange = reader.ReadSingle();
-                AttackCooldown = reader.ReadSingle();
-
+                MaxSpeed = reader.ReadSingle(); 
+                TurnRate = reader.ReadSingle();
+                
                 CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed); 
-                StatsChanged?.Invoke();
+                StatsChanged?.Invoke(); // For MaxSpeed, TurnRate
             }
 
             protected override void DeserializeSpecificState(BinaryReader reader) { 
                 base.DeserializeSpecificState(reader); 
                 
                 float serverAuthoritativeSpeed = reader.ReadSingle(); 
-                // If we are doing full state correction, we might snap _clientSimulatedSpeed too.
-                // For now, this is mainly for full stat overrides (e.g. after upgrade)
-                // If Math.Abs(_clientSimulatedSpeed - serverAuthoritativeSpeed) > some_threshold then adjust.
-                // However, this can cause jitter if server speed fluctuates differently than client prediction.
 
                 var oldMaxSpeed = MaxSpeed;
-                MaxSpeed = reader.ReadSingle(); TurnRate = reader.ReadSingle();
-                AttackDamage = reader.ReadSingle(); AttackRange = reader.ReadSingle();
-                AttackCooldown = reader.ReadSingle();
-                if (Math.Abs(MaxSpeed - oldMaxSpeed) > float.Epsilon /* || other stats changed significantly */) {
+                var oldTurnRate = TurnRate; // Store old TurnRate to check for changes
+                MaxSpeed = reader.ReadSingle(); 
+                TurnRate = reader.ReadSingle();
+                
+                if (Math.Abs(MaxSpeed - oldMaxSpeed) > float.Epsilon || Math.Abs(TurnRate - oldTurnRate) > float.Epsilon) {
                     StatsChanged?.Invoke();
                 }
             }
@@ -132,7 +127,6 @@ namespace Core.Network.Proxies
                     }
                 }
                 else {
-                    // Pass to base if this proxy doesn't handle it (e.g. DestructibleEntity events)
                     base.HandleSpecificEvent(specificEventType, reader); 
                 }
             }
@@ -155,15 +149,11 @@ namespace Core.Network.Proxies
                 float predictedSpeed = serverSpeedAtCommand;
                 bool stillMovingAfterCatchUp = hasTarget;
 
-                if (catchUpDeltaTime > 0.001f && _currentMovementTarget.HasValue) // Only catch up if time has passed and there's a target
+                if (catchUpDeltaTime > 0.001f && _currentMovementTarget.HasValue) 
                 {
-                    // Simulate movement for the catchUpDeltaTime
-                    // To avoid duplicating logic, we can call a helper or a stripped-down version of UpdateMovement
-                    // For simplicity here, let's assume a single step catch-up.
-                    // A more accurate catch-up might involve multiple small steps if catchUpDeltaTime is large.
                     var catchUpResult = SimulateMovementStep(
                         serverPosAtCommand, serverRotAtCommand, serverSpeedAtCommand,
-                        _currentMovementTarget, MaxSpeed, TurnRate, catchUpDeltaTime, true // Assume wants to move
+                        _currentMovementTarget, MaxSpeed, TurnRate, catchUpDeltaTime, true 
                     );
                     predictedPos = catchUpResult.newPos;
                     predictedRot = catchUpResult.newRot;
@@ -178,17 +168,10 @@ namespace Core.Network.Proxies
                     CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
                 }
                 
-                _isMovingClientSide = stillMovingAfterCatchUp && hasTarget; // If catch-up reached target, stop
+                _isMovingClientSide = stillMovingAfterCatchUp && hasTarget; 
                 if (!_isMovingClientSide) _currentMovementTarget = null;
-
-
-                // Logger.Log($"[ShipProxy.Client {EntityId}] Rcvd SetMovementTarget. Target: {_currentMovementTarget?.ToString() ?? "None"}. ServerTime: {serverTimeOfCommand}, ClientTime: {clientTimeNow}, CatchUpDT: {catchUpDeltaTime}. Snapped/Predicted to Pos={predictedPos}, Rot={predictedRot}, Spd={predictedSpeed}");
             }
             
-            /// <summary>
-            /// Simulates one step of movement.
-            /// </summary>
-            /// <returns>Tuple of newPos, newRot, newSpeed, stillMoving</returns>
             private (Vector3 newPos, Quaternion newRot, float newSpeed, bool stillMoving) SimulateMovementStep(
                 Vector3 currentPosition, Quaternion currentRotation, float currentSpeedParam,
                 Vector2? target, float currentMaxSpeed, float currentTurnRate, float deltaTime, bool hasExternalMoveOrder)
@@ -200,7 +183,7 @@ namespace Core.Network.Proxies
 
                 if (!hasExternalMoveOrder || !target.HasValue)
                 {
-                    if (nextSpeed > 0) nextSpeed = Math.Max(0, nextSpeed - (currentMaxSpeed * 2f * deltaTime)); // Decelerate
+                    if (nextSpeed > 0) nextSpeed = Math.Max(0, nextSpeed - (currentMaxSpeed * 2f * deltaTime)); 
                     else nextSpeed = 0f;
                     stillNeedsToMove = false;
                     return (nextPos, nextRot, nextSpeed, stillNeedsToMove);
@@ -212,15 +195,14 @@ namespace Core.Network.Proxies
 
                 float distanceToTargetSq = toTarget.SqrMagnitude;
                 
-                // Adjusted stopping condition: try to match server's dynamic threshold principle
-                float speedForStoppingCalc = currentMaxSpeed; // Use MaxSpeed for threshold calculation
-                float stoppingDistance = speedForStoppingCalc * deltaTime * 0.75f; // A bit more generous factor for client
+                float speedForStoppingCalc = currentMaxSpeed; 
+                float stoppingDistance = speedForStoppingCalc * deltaTime * 0.75f; 
                 float stoppingDistanceSq = stoppingDistance * stoppingDistance;
-                stoppingDistanceSq = Math.Max(0.01f * 0.01f, stoppingDistanceSq); // Min threshold
+                stoppingDistanceSq = Math.Max(0.01f * 0.01f, stoppingDistanceSq); 
 
                 if (distanceToTargetSq < stoppingDistanceSq)
                 {
-                    nextPos = new Vector3(targetPos2D.X, currentPosition.Y, targetPos2D.Y); // Snap to target XZ
+                    nextPos = new Vector3(targetPos2D.X, currentPosition.Y, targetPos2D.Y); 
                     nextSpeed = 0f;
                     stillNeedsToMove = false;
                 }
@@ -249,23 +231,16 @@ namespace Core.Network.Proxies
                 base.Update(deltaTime); 
                 if (deltaTime <= 0f) return;
 
-                // If not actively moving client-side, don't try to predict new positions.
-                // The position will be updated by server corrections or new SetMovementTarget events.
                 if (!_isMovingClientSide || !_currentMovementTarget.HasValue)
                 {
-                    // Optionally, if speed is > 0, simulate deceleration here, but without changing position based on a null target
                     if (_clientSimulatedSpeed > 0)
                     {
-                        _clientSimulatedSpeed = Math.Max(0, _clientSimulatedSpeed - (MaxSpeed * 2f * deltaTime)); // Match server ship deceleration logic
+                        _clientSimulatedSpeed = Math.Max(0, _clientSimulatedSpeed - (MaxSpeed * 2f * deltaTime)); 
                         CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
                     }
                     else { _clientSimulatedSpeed = 0f; }
-                    return; // Important: return here if no active client-side movement
+                    return; 
                 }
-
-                // Existing client-side prediction logic from SimulateMovementStep would follow here
-                // This part is assumed to be similar to what was in SimulateMovementStep
-                // but operating directly on _simulatedPosition, _simulatedRotation, _clientSimulatedSpeed
 
                 var simResult = SimulateMovementStep(
                     _simulatedPosition, 
@@ -288,14 +263,14 @@ namespace Core.Network.Proxies
 
                 _isMovingClientSide = simResult.stillMoving;
                 if (!_isMovingClientSide) {
-                    // Reached target according to client prediction
                      _currentMovementTarget = null; 
-                    // Logger.Log($"[ShipProxy.Client {EntityId}] Client-side movement target reached/stopped.");
                 }            
             }
 
             protected override void CleanupEvents() {
-                base.CleanupEvents(); CurrentSpeedChanged = null; StatsChanged = null;
+                base.CleanupEvents(); 
+                CurrentSpeedChanged = null; 
+                StatsChanged = null;
             }
             protected override void InvokeSpecificStateChangedEvents() { 
                 base.InvokeSpecificStateChangedEvents();

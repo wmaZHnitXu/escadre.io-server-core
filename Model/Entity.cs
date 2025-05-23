@@ -9,7 +9,8 @@ namespace Core.Model
         {
             Debug,
             Escadre,
-            DefaultShip
+            DefaultShip,
+            DefaultCannon
         }
         public abstract EntityTypeEnum EntityType { get; }
         public int Id { get; private set; }
