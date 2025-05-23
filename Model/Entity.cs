@@ -23,7 +23,7 @@ namespace Core.Model
         }
 
         private Quaternion _rotation;
-        public Quaternion Rotation
+        public virtual Quaternion Rotation
         {
             get => _rotation;
             protected set => _rotation = value;
