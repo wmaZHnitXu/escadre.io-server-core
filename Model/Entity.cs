@@ -42,7 +42,7 @@ namespace Core.Model
 
         public Entity(Level level)
         {
-            _level = level ?? throw new ArgumentNullException(nameof(level)); // Ensure level is not null
+            _level = level ?? throw new ArgumentNullException(nameof(level));
             _level.AddEntity(this);
         }
 
@@ -57,26 +57,22 @@ namespace Core.Model
 
             if (FloatingBehavior != null && _level.OceanDataProvider != null)
             {
-                // The entity's "base" XZ from which to sample the ocean.
-                // For simple entities, this is just Position.X and Position.Z.
-                // For entities whose movement is planar and then Y is adjusted (like ships),
-                // this XZ is their current planar position.
                 float sampleX = Position.X;
                 float sampleZ = Position.Z;
 
-                // Get ocean displacement and normal at the entity's current "base" XZ position
                 Vector3 oceanDisplacement = _level.OceanDataProvider.GetDisplacement(sampleX, sampleZ, _level.CurrentTime);
                 Vector3 oceanNormal = _level.OceanDataProvider.GetNormal(sampleX, sampleZ, _level.CurrentTime);
-
-                // The oceanSurfacePoint is the entity's current base XZ plus the ocean's full displacement vector.
-                // This is the point on the surface that corresponds to the entity's footprint.
                 Vector3 targetSurfacePoint = new Vector3(
                     sampleX + oceanDisplacement.X, 
-                    oceanDisplacement.Y,           // The Y component of displacement is the ocean surface height relative to Y=0
+                    oceanDisplacement.Y,           
                     sampleZ + oceanDisplacement.Z  
                 );
                 
-                FloatingBehavior.ApplyFloating(this, targetSurfacePoint, oceanNormal, delta);
+                Vector3 newPos;
+                Quaternion newRot;
+                FloatingBehavior.ApplyFloating(this.Position, this.Rotation, targetSurfacePoint, oceanNormal, delta, out newPos, out newRot);
+                this.Position = newPos;
+                this.Rotation = newRot;
             }
         }
 

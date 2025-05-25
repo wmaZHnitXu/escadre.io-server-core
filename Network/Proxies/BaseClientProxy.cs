@@ -43,10 +43,8 @@ namespace Core.Network.Proxies
         {
             _simulatedPosition = SerializationUtils.ReadVector3(reader);
             _simulatedRotation = SerializationUtils.ReadQuaternion(reader);
-            DeserializeSpecificInitialState(reader); // This is where derived proxies (like ShipProxy) can set _clientFloatingBehavior
+            DeserializeSpecificInitialState(reader); 
 
-            // Initial server position already includes ocean effects.
-            // Client-side floating simulation in Update() will maintain this.
             PositionChanged?.Invoke(_simulatedPosition);
             RotationChanged?.Invoke(_simulatedRotation);
         }
@@ -121,10 +119,6 @@ namespace Core.Network.Proxies
 
         public virtual void Update(float deltaTime)
         {
-            // Derived proxies like ShipProxy will override this to combine their
-            // planar movement simulation with ocean floating effects.
-            // This base implementation is a fallback if a proxy is floatable but doesn't have
-            // its own complex movement.
             if (!_isDestroyed && _clientFloatingBehavior != null && OwningClientLevel.IsOceanInitialized)
             {
                 float sampleX = _simulatedPosition.X;
@@ -138,32 +132,16 @@ namespace Core.Network.Proxies
                     sampleZ + oceanDisplacement.Z
                 );
                 
-                var tempEntity = new TempEntityForFloatingLogic(_simulatedPosition, _simulatedRotation);
-                _clientFloatingBehavior.ApplyFloating(tempEntity, targetSurfacePoint, oceanNormal, deltaTime);
+                Vector3 newSimPos;
+                Quaternion newSimRot;
+                _clientFloatingBehavior.ApplyFloating(_simulatedPosition, _simulatedRotation, targetSurfacePoint, oceanNormal, deltaTime, out newSimPos, out newSimRot);
                 
-                if (tempEntity.Position != _simulatedPosition || tempEntity.Rotation != _simulatedRotation)
+                if (newSimPos != _simulatedPosition || newSimRot != _simulatedRotation)
                 {
-                    SetSimulatedPositionAndRotation(tempEntity.Position, tempEntity.Rotation);
+                    SetSimulatedPositionAndRotation(newSimPos, newSimRot);
                 }
             }
         }
-
-        // Internal helper for client-side floating logic if Entity class cannot be instantiated directly.
-        // This is a minimal stand-in for what IFloatingBehavior.ApplyFloating expects.
-        protected internal class TempEntityForFloatingLogic : Entity 
-        {
-            public TempEntityForFloatingLogic(Vector3 pos, Quaternion rot) : base(null) 
-            { 
-                // Directly set private fields to bypass AddEntity in base constructor
-                // This is a bit of a hack due to Entity's constructor adding to Level.
-                // A cleaner way would be an Entity constructor that doesn't auto-add, or ApplyFloating taking raw values.
-                typeof(Entity).GetField("_position", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(this, pos);
-                typeof(Entity).GetField("_rotation", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(this, rot);
-            }
-            public override EntityTypeEnum EntityType => (EntityTypeEnum)(-1); // Dummy
-            public override void Update(float delta) { /* NOP */ }
-        }
-
 
         public void NotifyDestroyed() {
             if (_isDestroyed) return; _isDestroyed = true;
@@ -195,7 +173,7 @@ namespace Core.Network.Proxies
 
             if (Math.Abs(newPosition.X) < 0.01f && 
                 Math.Abs(newPosition.Z) < 0.01f &&
-                _simulatedPosition != Vector3.Zero && // Check against default only if _simulatedPosition is initialized
+                _simulatedPosition != Vector3.Zero && 
                 Math.Abs(newPosition.Y - _simulatedPosition.X) < 0.01f &&
                 (_simulatedPosition.X != 0f || Math.Abs(newPosition.Y) > 0.01f) && 
                 newPosition != _simulatedPosition) 
