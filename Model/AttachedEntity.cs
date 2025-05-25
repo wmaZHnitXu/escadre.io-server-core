@@ -50,7 +50,7 @@ namespace Core.Model
                 }
                 return Owner.Rotation * LocalRotationOffset;
             }
-            protected set
+            set
             {
                 if (Owner == null || Owner.IsDead)
                 {

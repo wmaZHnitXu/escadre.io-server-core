@@ -27,7 +27,7 @@ namespace Core.Model
         public virtual Quaternion Rotation
         {
             get => _rotation;
-            protected set => _rotation = value;
+            set => _rotation = value;
         }
 
         public bool IsDead { get; private set; }
