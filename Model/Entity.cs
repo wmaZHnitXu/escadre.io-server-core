@@ -1,5 +1,7 @@
+// File: Core/Model/Entity.cs
 using System;
 using Core.Primitives;
+using Core.Ocean; 
 
 namespace Core.Model
 {
@@ -32,28 +34,15 @@ namespace Core.Model
 
         public bool IsDead { get; private set; }
 
-        /// <summary>
-        /// <code>(Entity theDyingOne)</code> 
-        /// Obligatory final OnDeath before it will be removed from the level.
-        /// </summary>
+        public IFloatingBehavior FloatingBehavior { get; set; }
+
         public event Action<Entity> OnDeathEvent;
-
-        /// <summary>
-        /// <code>(Entity theDyingAloudOne)</code> 
-        /// May not be called if this is the silent removal.
-        /// Made for kinda destruction sequences.
-        /// </summary>
         public event Action<Entity> OnDestructionEvent;
-
-        /// <summary>
-        /// <code>(teleportant, position, rotation)</code> 
-        /// Event raised when the entity is teleported (instantaneous position/rotation change).
-        /// </summary>
         public event Action<Entity, Vector3, Quaternion> OnTeleported;
 
         public Entity(Level level)
         {
-            _level = level;
+            _level = level ?? throw new ArgumentNullException(nameof(level)); // Ensure level is not null
             _level.AddEntity(this);
         }
 
@@ -64,7 +53,31 @@ namespace Core.Model
 
         public virtual void Update(float delta)
         {
+            if (IsDead) return;
 
+            if (FloatingBehavior != null && _level.OceanDataProvider != null)
+            {
+                // The entity's "base" XZ from which to sample the ocean.
+                // For simple entities, this is just Position.X and Position.Z.
+                // For entities whose movement is planar and then Y is adjusted (like ships),
+                // this XZ is their current planar position.
+                float sampleX = Position.X;
+                float sampleZ = Position.Z;
+
+                // Get ocean displacement and normal at the entity's current "base" XZ position
+                Vector3 oceanDisplacement = _level.OceanDataProvider.GetDisplacement(sampleX, sampleZ, _level.CurrentTime);
+                Vector3 oceanNormal = _level.OceanDataProvider.GetNormal(sampleX, sampleZ, _level.CurrentTime);
+
+                // The oceanSurfacePoint is the entity's current base XZ plus the ocean's full displacement vector.
+                // This is the point on the surface that corresponds to the entity's footprint.
+                Vector3 targetSurfacePoint = new Vector3(
+                    sampleX + oceanDisplacement.X, 
+                    oceanDisplacement.Y,           // The Y component of displacement is the ocean surface height relative to Y=0
+                    sampleZ + oceanDisplacement.Z  
+                );
+                
+                FloatingBehavior.ApplyFloating(this, targetSurfacePoint, oceanNormal, delta);
+            }
         }
 
         public void Kill(bool silent = false)
@@ -93,19 +106,16 @@ namespace Core.Model
 
             _position = newPosition;
             _rotation = newRotation;
-            // Logger.Log($"[Entity {Id}] Teleported to Pos: {newPosition}, Rot: {newRotation}");
             OnTeleported?.Invoke(this, _position, _rotation);
         }
 
         protected virtual void ObligatoryOnRemove()
         {
-            // To break any dependencies inside of the model before removal
+            FloatingBehavior = null; 
         }
 
         protected virtual void Death()
         {
-            // Destruction sequence (Ship explodes -> Damage entities near)
         }
     }
 }
-

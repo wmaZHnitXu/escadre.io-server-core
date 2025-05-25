@@ -15,7 +15,8 @@ namespace Core.Network
         DestroyEntity = 2,          
         VanishEntity = 3,           
         UpdateState = 4,            
-        EntityEvent = 5,            
+        EntityEvent = 5,   
+        OceanInitializationData = 6, 
 
         // C->S State Sync & View Updates
         _ClientSyncState = 10,
@@ -78,9 +79,7 @@ namespace Core.Network
 
     public interface IClientNetworkLayer
     {
-        // SendToServer will now take sendingNetworkSourceId
         void SendToServer(int sendingNetworkSourceId, int contextEntityId, MessageType messageType, Action<BinaryWriter> serializePayloadAction);
-        // OnMessageReceived will now pass payload as byte[]
         event Action<int /*contextEntityId*/, MessageType, byte[] /*payload*/> OnMessageReceived;
     }
 }

@@ -1,14 +1,11 @@
 // File: Core/Network/Proxies/SerializationUtils.cs
 using System.IO;
 using Core.Primitives;
-using Core.Model; // For DamageInfo, DamageType
+using Core.Model; 
+using Core.Ocean; 
 
 namespace Core.Network.Proxies
 {
-    /// <summary>
-    /// Provides static utility methods for serializing and deserializing common data types
-    /// used in network messages.
-    /// </summary>
     internal static class SerializationUtils
     {
         public static void WriteVector3(BinaryWriter writer, Vector3 v)
@@ -70,6 +67,25 @@ namespace Core.Network.Proxies
             int? attackerOwnerClientId = null;
             if (reader.ReadBoolean()) attackerOwnerClientId = reader.ReadInt32();
             return new DamageInfo(amount, type, hitPoint, direction, attackerId, attackerOwnerClientId);
+        }
+
+        public static void WriteOceanSettings(BinaryWriter writer, OceanSettings settings)
+        {
+            writer.Write(settings.DisplacementScale);
+            writer.Write(settings.TextureTileWorldSize);
+            writer.Write(settings.TextureTimeLoopDuration);
+            writer.Write(settings.TextureResolutionXZ);
+            writer.Write(settings.TextureResolutionTime);
+        }
+
+        public static OceanSettings ReadOceanSettings(BinaryReader reader)
+        {
+            float displacementScale = reader.ReadSingle();
+            float textureTileWorldSize = reader.ReadSingle();
+            float textureTimeLoopDuration = reader.ReadSingle();
+            int resolutionXZ = reader.ReadInt32();
+            int resolutionTime = reader.ReadInt32();
+            return new OceanSettings(displacementScale, textureTileWorldSize, textureTimeLoopDuration, resolutionXZ, resolutionTime);
         }
     }
 }

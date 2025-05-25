@@ -1,3 +1,4 @@
+// File: Core/Primitives/Quaternion.cs
 using System;
 using System.Runtime.CompilerServices;
 using Core.Logging; // Assuming Core.Logging.Logger is available for warnings
@@ -134,6 +135,47 @@ namespace Core.Primitives
             return new Vector3(x * Rad2Deg, y * Rad2Deg, z * Rad2Deg);
         }
 
+        /// <summary>
+        /// Creates a rotation which rotates from fromDirection to toDirection.
+        /// </summary>
+        public static Quaternion FromToRotation(Vector3 fromDirection, Vector3 toDirection)
+        {
+            Vector3 from = fromDirection.Normalized;
+            Vector3 to = toDirection.Normalized;
+
+            float dot = Vector3.Dot(from, to);
+
+            if (dot > 1.0f - Epsilon) // Vectors are already aligned
+            {
+                return Identity;
+            }
+            else if (dot < -1.0f + Epsilon) // Vectors are opposite
+            {
+                // Need to find an arbitrary axis orthogonal to 'from'
+                Vector3 axis = Vector3.Cross(Vector3.Right, from);
+                if (axis.SqrMagnitude < Vector3.Epsilon * Vector3.Epsilon) // 'from' was aligned with Right or Left
+                {
+                    axis = Vector3.Cross(Vector3.Up, from);
+                }
+                return AngleAxis(axis.Normalized, 180f);
+            }
+            else
+            {
+                Vector3 rotAxis = Vector3.Cross(from, to).Normalized;
+                float angleRad = MathF.Acos(dot); // Angle in radians
+
+                float halfAngleRad = angleRad * 0.5f;
+                float s = MathF.Sin(halfAngleRad);
+                return new Quaternion(
+                    rotAxis.X * s,
+                    rotAxis.Y * s,
+                    rotAxis.Z * s,
+                    MathF.Cos(halfAngleRad)
+                ).Normalized;
+            }
+        }
+
+
         public static Quaternion Slerp(Quaternion a, Quaternion b, float t)
         {
             t = Math.Clamp(t, 0f, 1f);
@@ -244,37 +286,37 @@ namespace Core.Primitives
 
             if (trace > 0f)
             {
-                float s = 0.5f / MathF.Sqrt(trace + 1.0f);
-                w = 0.25f / s;
-                x = (m21 - m12) * s;
-                y = (m02 - m20) * s;
-                z = (m10 - m01) * s;
+                float s_val = 0.5f / MathF.Sqrt(trace + 1.0f);
+                w = 0.25f / s_val;
+                x = (m21 - m12) * s_val;
+                y = (m02 - m20) * s_val;
+                z = (m10 - m01) * s_val;
             }
             else
             {
                 if (m00 > m11 && m00 > m22)
                 {
-                    float s = 2.0f * MathF.Sqrt(1.0f + m00 - m11 - m22);
-                    w = (m21 - m12) / s;
-                    x = 0.25f * s;
-                    y = (m01 + m10) / s;
-                    z = (m02 + m20) / s;
+                    float s_val = 2.0f * MathF.Sqrt(1.0f + m00 - m11 - m22);
+                    w = (m21 - m12) / s_val;
+                    x = 0.25f * s_val;
+                    y = (m01 + m10) / s_val;
+                    z = (m02 + m20) / s_val;
                 }
                 else if (m11 > m22)
                 {
-                    float s = 2.0f * MathF.Sqrt(1.0f + m11 - m00 - m22);
-                    w = (m02 - m20) / s;
-                    x = (m01 + m10) / s;
-                    y = 0.25f * s;
-                    z = (m12 + m21) / s;
+                    float s_val = 2.0f * MathF.Sqrt(1.0f + m11 - m00 - m22);
+                    w = (m02 - m20) / s_val;
+                    x = (m01 + m10) / s_val;
+                    y = 0.25f * s_val;
+                    z = (m12 + m21) / s_val;
                 }
                 else
                 {
-                    float s = 2.0f * MathF.Sqrt(1.0f + m22 - m00 - m11);
-                    w = (m10 - m01) / s;
-                    x = (m02 + m20) / s;
-                    y = (m12 + m21) / s;
-                    z = 0.25f * s;
+                    float s_val = 2.0f * MathF.Sqrt(1.0f + m22 - m00 - m11);
+                    w = (m10 - m01) / s_val;
+                    x = (m02 + m20) / s_val;
+                    y = (m12 + m21) / s_val;
+                    z = 0.25f * s_val;
                 }
             }
             return new Quaternion(x, y, z, w).Normalized; // Ensure normalization
@@ -373,10 +415,10 @@ namespace Core.Primitives
             float wy = q.W * y;
             float wz = q.W * z;
 
-            float X = (1f - (yy + zz)) * point.X + (xy - wz) * point.Y + (xz + wy) * point.Z;
-            float Y = (xy + wz) * point.X + (1f - (xx + zz)) * point.Y + (yz - wx) * point.Z;
-            float Z = (xz - wy) * point.X + (yz + wx) * point.Y + (1f - (xx + yy)) * point.Z;
-            Vector3 res = new Vector3(X, Y, Z);
+            float X_res = (1f - (yy + zz)) * point.X + (xy - wz) * point.Y + (xz + wy) * point.Z;
+            float Y_res = (xy + wz) * point.X + (1f - (xx + zz)) * point.Y + (yz - wx) * point.Z;
+            float Z_res = (xz - wy) * point.X + (yz + wx) * point.Y + (1f - (xx + yy)) * point.Z;
+            Vector3 res = new Vector3(X_res, Y_res, Z_res);
             return res;
         }
 

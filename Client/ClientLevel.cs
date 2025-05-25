@@ -5,6 +5,7 @@ using System.Linq;
 using Core.Network; // For IClientProxy
 using Core.Logging;
 using Core.Time;    // For IClock
+using Core.Ocean;   
 
 namespace Core.Client
 {
@@ -15,31 +16,60 @@ namespace Core.Client
 
         public event Action<IClientProxy> OnProxyAdded;
         public event Action<IClientProxy> OnProxyRemoved;
+        public event Action<OceanSettings> OnOceanSettingsReceived; 
 
         private readonly IClock _clock;
         public float CurrentTime => _clock.CurrentTime;
 
+        public IOceanDataProvider OceanDataProvider { get; private set; }
+        public bool IsOceanInitialized => OceanDataProvider != null && OceanDataProvider.Settings != null;
+
+
         public ClientLevel(IClock clock)
         {
             _clock = clock ?? throw new ArgumentNullException(nameof(clock));
-            Logger.Log("[ClientLevel] Initialized.");
+            Logger.Log("[ClientLevel] Initialized. Waiting for ocean data from server.");
         }
+        
+        /// <summary>
+        /// Initializes the ocean data provider for the client level.
+        /// This is typically called after OceanSettings are received from the server.
+        /// </summary>
+        public void InitializeOcean(IOceanDataProvider dataProvider) 
+        {
+            if (OceanDataProvider != null)
+            {
+                Logger.LogWarning("[ClientLevel] OceanDataProvider is already initialized. Replacing.");
+                (OceanDataProvider as IDisposable)?.Dispose();
+            }
+            OceanDataProvider = dataProvider ?? throw new ArgumentNullException(nameof(dataProvider));
+            OceanSettings settings = OceanDataProvider.Settings; 
+            Logger.Log($"[ClientLevel] Ocean data provider initialized. TileSize: {settings.TextureTileWorldSize}, LoopDur: {settings.TextureTimeLoopDuration}, Scale: {settings.DisplacementScale}");
+        }
+
+        /// <summary>
+        /// Internal method called by ClientEntityManager when OceanSettings are received from the server.
+        /// This fires an event that ClientComposer can use to construct the IOceanDataProvider with local raw data.
+        /// </summary>
+        internal void TriggerOceanSettingsReceived(OceanSettings settings)
+        {
+            if (settings == null)
+            {
+                Logger.LogError("[ClientLevel] TriggerOceanSettingsReceived called with null settings.");
+                return;
+            }
+            OnOceanSettingsReceived?.Invoke(settings);
+        }
+
 
         public void DoUpdate(float deltaTime)
         {
-            // The _clock.CurrentTime will reflect the advancing time.
-            // deltaTime is the frame's delta.
-
-            // Iterate a copy of values in case an Update call leads to a proxy being removed
             var proxiesToUpdate = _activeProxies.Values.ToList();
             foreach (var proxy in proxiesToUpdate)
             {
-                // Ensure proxy wasn't removed mid-iteration by another thread/callback
                 if (!_activeProxies.ContainsKey(proxy.EntityId)) continue;
-
                 try
                 {
-                    // Pass only deltaTime. Proxies can get CurrentTime from this ClientLevel instance.
                     proxy.Update(deltaTime);
                 }
                 catch (Exception ex)
@@ -58,8 +88,7 @@ namespace Core.Client
             if (_activeProxies.ContainsKey(proxy.EntityId)) {
                 Logger.LogWarning($"[ClientLevel] Proxy ID {proxy.EntityId} (NewType: {proxy.EntityType}, OldType: {_activeProxies[proxy.EntityId].EntityType}) already exists. Replacing.");
                 if (_activeProxies.TryGetValue(proxy.EntityId, out var oldProxy)) {
-                    // oldProxy.NotifyDestroyed(); // Let ClientEntityManager handle this sequence via HandleProxyVanished
-                    RemoveProxy(oldProxy.EntityId, out _); // Ensure it's gone from ClientLevel and event is raised
+                    RemoveProxy(oldProxy.EntityId, out _); 
                 }
             }
             _activeProxies[proxy.EntityId] = proxy;
@@ -103,6 +132,9 @@ namespace Core.Client
             ClearAllProxies(); 
             OnProxyAdded = null; 
             OnProxyRemoved = null; 
+            OnOceanSettingsReceived = null; 
+            (OceanDataProvider as IDisposable)?.Dispose();
+            OceanDataProvider = null; 
             Logger.Log("[ClientLevel] Disposed."); 
         }
     }

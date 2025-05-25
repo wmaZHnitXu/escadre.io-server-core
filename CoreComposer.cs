@@ -10,6 +10,7 @@ using Core.Session;
 using Core.Primitives;
 using Core.Time;
 using System.Linq;
+using Core.Ocean; 
 
 
 namespace Core
@@ -23,6 +24,7 @@ namespace Core
         private readonly IClock _serverClock; 
         private readonly IServerNetworkLayer _networkLayer; 
         private readonly IClientConnectionValidator _connectionValidator; 
+        private readonly IOceanDataProvider _serverOceanDataProvider; 
 
         private bool _isDisposed = false;
         private readonly Dictionary<int, ClientConnection> _clientConnections = new Dictionary<int, ClientConnection>();
@@ -32,32 +34,28 @@ namespace Core
         private readonly Dictionary<int, int> _gameClientIdToSourceNetworkIdMap = new Dictionary<int, int>();
 
 
-        public event Action<ClientConnection> ClientRegisteredEvent; // Still useful for systems that need to know when a client is fully set up
+        public event Action<ClientConnection> ClientRegisteredEvent; 
         public event Action<ClientConnection> ClientUnregisteredEvent;
 
         public CoreComposer(IServerNetworkLayer networkLayer, 
                             IVisibilityStrategy visibilityStrategy, 
                             IClock serverClock,
-                            IClientConnectionValidator connectionValidator)
+                            IClientConnectionValidator connectionValidator,
+                            IOceanDataProvider serverOceanDataProvider) 
         {
             _networkLayer = networkLayer ?? throw new ArgumentNullException(nameof(networkLayer));
             _visibilityStrategy = visibilityStrategy ?? throw new ArgumentNullException(nameof(visibilityStrategy));
             _serverClock = serverClock ?? throw new ArgumentNullException(nameof(serverClock)); 
             _connectionValidator = connectionValidator ?? throw new ArgumentNullException(nameof(connectionValidator));
+            _serverOceanDataProvider = serverOceanDataProvider; // Can be null if ocean is disabled server-side
 
             Logger.Log("[CoreComposer] Initializing Core Systems...");
 
-            ServerLevel = new Level(); 
+            ServerLevel = new Level(_serverOceanDataProvider); 
             VisibilityManager = new VisibilityManager(_visibilityStrategy);
-            // Pass 'this' (CoreComposer) to SRM so it can subscribe to ClientRegistered/Unregistered events
-            // This is if SRM needs to do specific setup for EscadreProxy *entities* when a client connects,
-            // but now Escadre is a generic entity, so specific SRM handling for it might be less.
-            // For now, SRM doesn't need CoreComposer reference for EscadreProxy creation as it's handled by generic entity flow.
             _replicationManager = new ServerReplicationManager(ServerLevel, _networkLayer, VisibilityManager, _clientConnections, _serverClock); 
             
             _networkLayer.OnClientMessageReceived += HandleNetworkMessage_SessionManagement;
-
-            // Subscribe to entity removal to handle Escadre destruction
             ServerLevel.OnEntityRemovedEvent += HandleEntityRemoved; 
 
             Logger.Log("[CoreComposer] Initialization Complete. Listening for client connections.");
@@ -72,23 +70,10 @@ namespace Core
                 Logger.Log($"[CoreComposer] Detected removal of Escadre Entity ID {destroyedEscadre.Id}, Owner: {destroyedEscadre.OwnerClientId}. Checking for associated client connection.");
                 if (_clientConnections.TryGetValue(destroyedEscadre.OwnerClientId, out ClientConnection clientConnection))
                 {
-                    // Check if the client is still considered active with this escadre
                     if (clientConnection.EscadreEntity == destroyedEscadre && clientConnection.CurrentState != ClientState.Destroyed)
                     {
                         Logger.Log($"[CoreComposer] Escadre {destroyedEscadre.Id} for Client {clientConnection.ClientId} was removed/destroyed. Setting ClientConnection state to Destroyed.");
-                        // It's important this SetState to Destroyed happens *before* any UnregisterClient call for this client,
-                        // or that UnregisterClient doesn't try to re-kill the already dead escadre.
-                        // The Escadre is already dead and removed from the level.
-                        // We just need to update the ClientConnection's state.
-                        // UnregisterClient also handles PVS removal etc., which might be desired.
-                        // For now, let's just set the state. If full unregistration is needed, that's a different path.
                         clientConnection.SetState(ClientState.Destroyed);
-                        // Consider if full UnregisterClient(clientConnection.ClientId) should be called here.
-                        // If so, ensure UnregisterClient handles a null/already-dead EscadreEntity gracefully.
-                        // For now, simply setting state to Destroyed might be enough to stop further interactions.
-                        // UnregisterClient also removes the client from _clientConnections, which might be too much if they could e.g. respawn.
-                        // If a client whose escadre is destroyed should be fully disconnected, then call UnregisterClient.
-                        // Let's assume for now that their connection persists but is marked as Destroyed.
                     }
                     else if (clientConnection.CurrentState == ClientState.Destroyed)
                     {
@@ -101,7 +86,6 @@ namespace Core
                 }
                 else
                 {
-                    // This could happen if an Escadre is destroyed for a client that already disconnected
                     Logger.Log($"[CoreComposer] Escadre Entity ID {destroyedEscadre.Id} (Owner: {destroyedEscadre.OwnerClientId}) removed, but no active client connection found for this owner.");
                 }
             }
@@ -122,13 +106,14 @@ namespace Core
                     if (_clientConnections.ContainsKey(validatedIdentity.ClientId))
                     {
                         Logger.LogWarning($"[CoreComposer] Client ID {validatedIdentity.ClientId} (from token) is already connected. Rejecting new connection from source {sourceNetworkId}.");
+                        // Optionally, send a rejection message back. For now, just log and return.
                         return;
                     }
                     if (_sourceNetworkIdToGameClientIdMap.ContainsKey(sourceNetworkId))
                     {
                         Logger.LogWarning($"[CoreComposer] Network Source ID {sourceNetworkId} is already associated with game client {_sourceNetworkIdToGameClientIdMap[sourceNetworkId]}. New connect request from same source for different/new identity {validatedIdentity.ClientId} - this might indicate a client bug or reconnect attempt not fully handled. Overwriting mapping for now.");
                         int oldGameId = _sourceNetworkIdToGameClientIdMap[sourceNetworkId];
-                        if(_clientConnections.ContainsKey(oldGameId)) UnregisterClient(oldGameId, true);  // Pass a flag to indicate it's a forceful unregister due to new connection
+                        if(_clientConnections.ContainsKey(oldGameId)) UnregisterClient(oldGameId, true);  
                         else { _gameClientIdToSourceNetworkIdMap.Remove(oldGameId); _sourceNetworkIdToGameClientIdMap.Remove(sourceNetworkId); } 
                     }
 
@@ -139,7 +124,7 @@ namespace Core
 
                     float x = (validatedIdentity.ClientId % 7) * 25f - 75f; 
                     float z = ((validatedIdentity.ClientId / 7) % 7) * 25f - 75f;
-                    Vector3 spawnPosition = new Vector3(x, 0, z);
+                    Vector3 spawnPosition = new Vector3(x, 0, z); // Initial Y will be adjusted by ocean if active
                     
                     CreateClientSessionAndEscadreEntity(validatedIdentity, pvsRadius, spawnPosition, sourceNetworkId);
                 }
@@ -182,30 +167,19 @@ namespace Core
 
             var clientConnection = new ClientConnection(identity.ClientId, ServerLevel, initialPvsRadius); 
             _clientConnections.Add(identity.ClientId, clientConnection); 
-            VisibilityManager.AddOrUpdateClientView(clientConnection); // Client view now centered on Escadre entity
+            VisibilityManager.AddOrUpdateClientView(clientConnection); 
 
-            // Create Escadre as an Entity
             Escadre escadreEntity = new Escadre(ServerLevel, identity.ClientId, identity.Nickname, initialSpawnPosition);
-            // ServerLevel.AddEntity(escadreEntity); // Already done by Escadre constructor
+            clientConnection.AssignEscadre(escadreEntity); 
             
-            // Escadre entity creation will be picked up by ServerReplicationManager via Level.OnEntityAddedEvent
-            // and then replicated to clients (including the owner).
-
-            clientConnection.AssignEscadre(escadreEntity); // ClientConnection now holds reference to Escadre Entity
-            
-            // Add initial ship to this escadre
-            Ship initialShip = new DefaultShip(ServerLevel, escadreEntity, initialSpawnPosition); // Ship takes Escadre entity
-            // escadreEntity.AddShip(initialShip); // AddShip is internal, called by Shop or initial setup.
-                                               // Here, directly add. Note: ID might not be set yet by Level if _toAdd not processed.
-                                               // Let's assume initialShip's constructor adds it to level, and Level assigns ID before AddShip is called by shop.
-                                               // For initial setup, let's ensure ship is added to Level first, then to escadre.
-                                               // The DefaultShip constructor already calls Level.AddEntity.
-                                               // We need to ensure its ID is assigned *before* AddShip if formation relies on it immediately.
-                                               // For now, let AddShip handle adding it to the formation with auto-slotting.
+            Ship initialShip = new DefaultShip(ServerLevel, escadreEntity, initialSpawnPosition); 
             escadreEntity.AddShip(initialShip);
             escadreEntity.UpdateShipMovementTargets(_serverClock.CurrentTime);
 
             Logger.Log($"[CoreComposer] Client Session Created & Registered: ID={identity.ClientId}, Nick='{identity.Nickname}'. Mapped to NetworkSourceID: {sourceNetworkId}. Escadre Entity ID: {escadreEntity.Id}");
+
+            // Notify SRM to send initial data like OceanSettings
+            _replicationManager.OnClientSessionEstablished(identity.ClientId);
 
             ClientRegisteredEvent?.Invoke(clientConnection); 
             
@@ -236,15 +210,14 @@ namespace Core
                 else { Logger.LogWarning($"[CoreComposer] No sourceNetworkId mapping found for Game Client ID {gameClientId} during unregistration."); }
 
 
-                VisibilityManager.RemoveClientView(gameClientId); // PVS source is Escadre, which will be destroyed
+                VisibilityManager.RemoveClientView(gameClientId); 
                 
                 if (clientConnection.EscadreEntity != null)
                 {
                     Logger.Log($"[CoreComposer] Killing Escadre Entity ID {clientConnection.EscadreEntity.Id} for client {gameClientId}.");
-                    clientConnection.EscadreEntity.Kill(true); // Kill the Escadre entity silently
-                    // ServerLevel.RemoveEntity(clientConnection.EscadreEntity) will be handled by Level's death processing
+                    clientConnection.EscadreEntity.Kill(true); 
                 }
-                clientConnection.ClearEscadreReference(); // Clears reference in ClientConnection
+                clientConnection.ClearEscadreReference(); 
                 clientConnection.SetState(ClientState.Destroyed); 
                 _clientConnections.Remove(gameClientId);
             } else { Logger.LogWarning($"[CoreComposer] Attempted to unregister unknown client: {gameClientId}"); }
@@ -256,27 +229,22 @@ namespace Core
             try
             {
                 ServerLevel.DoUpdate(deltaTime); 
-                // Register all entities (including Escadres) with VisibilityManager
                 foreach (var entity in ServerLevel.GetAllEntities()) 
                 {
-                    if (!entity.IsDead) // Only register living entities for visibility calculation
+                    if (!entity.IsDead) 
                     {
                         VisibilityManager.RegisterEntity(entity); 
                     }
                 }
-                // Update client views - PVS is now centered on their Escadre entity's position
                 foreach (var clientConn in _clientConnections.Values.ToList()) 
                 {
                     if (clientConn.CurrentState != ClientState.Destroyed && clientConn.EscadreEntity != null && !clientConn.EscadreEntity.IsDead) 
                     {
-                        // ClientConnection.Position property now correctly reflects EscadreEntity.Position
                         VisibilityManager.AddOrUpdateClientView(clientConn);
                     }
                     else if (clientConn.CurrentState != ClientState.Destroyed && (clientConn.EscadreEntity == null || clientConn.EscadreEntity.IsDead))
                     {
-                        // If escadre is gone but client still connected (e.g. spectating), PVS might be static or based on spectator cam
-                        // For now, if escadre is dead, client view might become invalid for PVS until re-spawn or proper spectator.
-                        // VisibilityManager.RemoveClientView(clientConn.ClientId); // Or update to a spectator view
+                        // Handle spectator or other states if PVS should remain active
                     }
                 }
                 VisibilityManager.UpdateAllClientVisibility();
@@ -289,7 +257,6 @@ namespace Core
             if (_isDisposed) return; _isDisposed = true;
             Logger.Log("[CoreComposer] Disposing...");
 
-            // Unsubscribe from ServerLevel events
             if (ServerLevel != null)
             {
                 ServerLevel.OnEntityRemovedEvent -= HandleEntityRemoved;
@@ -307,9 +274,10 @@ namespace Core
             _gameClientIdToSourceNetworkIdMap.Clear();
 
             _replicationManager?.Dispose(); 
-            VisibilityManager?.Dispose(); // VisibilityManager.UnregisterEntity will be called for Escadres
-            ServerLevel?.Destroy(); // This will kill all entities, including Escadres
-            _visibilityStrategy?.Dispose();
+            VisibilityManager?.Dispose(); 
+            ServerLevel?.Destroy(); 
+            (_visibilityStrategy as IDisposable)?.Dispose();
+            (_serverOceanDataProvider as IDisposable)?.Dispose();
 
             ClientRegisteredEvent = null;
             ClientUnregisteredEvent = null;

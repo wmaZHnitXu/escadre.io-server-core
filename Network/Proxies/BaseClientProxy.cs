@@ -8,6 +8,7 @@ using Core.Primitives;
 using Core.Network;
 using Core.Logging;
 using Core.Client; 
+using Core.Ocean; 
 
 namespace Core.Network.Proxies
 {
@@ -25,6 +26,8 @@ namespace Core.Network.Proxies
 
         public ClientLevel OwningClientLevel { get; } 
 
+        protected IFloatingBehavior _clientFloatingBehavior; 
+
         public event Action OnDestroyed;
         public event Action OnLoudDestructionSignaled;
         public event Action<Vector3> PositionChanged;
@@ -40,8 +43,10 @@ namespace Core.Network.Proxies
         {
             _simulatedPosition = SerializationUtils.ReadVector3(reader);
             _simulatedRotation = SerializationUtils.ReadQuaternion(reader);
-            DeserializeSpecificInitialState(reader);
+            DeserializeSpecificInitialState(reader); // This is where derived proxies (like ShipProxy) can set _clientFloatingBehavior
 
+            // Initial server position already includes ocean effects.
+            // Client-side floating simulation in Update() will maintain this.
             PositionChanged?.Invoke(_simulatedPosition);
             RotationChanged?.Invoke(_simulatedRotation);
         }
@@ -87,20 +92,16 @@ namespace Core.Network.Proxies
         protected virtual void DeserializeAndDispatchEntityEvent(BinaryReader reader)
         {
             byte eventTypeByte = reader.ReadByte();
-            // Try to interpret as BaseProxyEventType first
             if (Enum.IsDefined(typeof(BaseProxyEventType), eventTypeByte))
             {
                 HandleBaseProxyEvent((BaseProxyEventType)eventTypeByte, reader);
             }
             else
             {
-                // If not a base event, pass to derived proxy's specific event handler
                 HandleSpecificEvent(eventTypeByte, reader);
             }
         }
         
-        // Method made public to match accessibility of BaseProxyEventType if it were protected internal
-        // but since BaseProxyEventType is now public, this can remain protected.
         protected virtual void HandleBaseProxyEvent(BaseProxyEventType eventType, BinaryReader reader)
         {
             switch (eventType)
@@ -120,7 +121,49 @@ namespace Core.Network.Proxies
 
         public virtual void Update(float deltaTime)
         {
+            // Derived proxies like ShipProxy will override this to combine their
+            // planar movement simulation with ocean floating effects.
+            // This base implementation is a fallback if a proxy is floatable but doesn't have
+            // its own complex movement.
+            if (!_isDestroyed && _clientFloatingBehavior != null && OwningClientLevel.IsOceanInitialized)
+            {
+                float sampleX = _simulatedPosition.X;
+                float sampleZ = _simulatedPosition.Z;
+
+                Vector3 oceanDisplacement = OwningClientLevel.OceanDataProvider.GetDisplacement(sampleX, sampleZ, OwningClientLevel.CurrentTime);
+                Vector3 oceanNormal = OwningClientLevel.OceanDataProvider.GetNormal(sampleX, sampleZ, OwningClientLevel.CurrentTime);
+                Vector3 targetSurfacePoint = new Vector3(
+                    sampleX + oceanDisplacement.X,
+                    oceanDisplacement.Y,
+                    sampleZ + oceanDisplacement.Z
+                );
+                
+                var tempEntity = new TempEntityForFloatingLogic(_simulatedPosition, _simulatedRotation);
+                _clientFloatingBehavior.ApplyFloating(tempEntity, targetSurfacePoint, oceanNormal, deltaTime);
+                
+                if (tempEntity.Position != _simulatedPosition || tempEntity.Rotation != _simulatedRotation)
+                {
+                    SetSimulatedPositionAndRotation(tempEntity.Position, tempEntity.Rotation);
+                }
+            }
         }
+
+        // Internal helper for client-side floating logic if Entity class cannot be instantiated directly.
+        // This is a minimal stand-in for what IFloatingBehavior.ApplyFloating expects.
+        protected internal class TempEntityForFloatingLogic : Entity 
+        {
+            public TempEntityForFloatingLogic(Vector3 pos, Quaternion rot) : base(null) 
+            { 
+                // Directly set private fields to bypass AddEntity in base constructor
+                // This is a bit of a hack due to Entity's constructor adding to Level.
+                // A cleaner way would be an Entity constructor that doesn't auto-add, or ApplyFloating taking raw values.
+                typeof(Entity).GetField("_position", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(this, pos);
+                typeof(Entity).GetField("_rotation", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(this, rot);
+            }
+            public override EntityTypeEnum EntityType => (EntityTypeEnum)(-1); // Dummy
+            public override void Update(float delta) { /* NOP */ }
+        }
+
 
         public void NotifyDestroyed() {
             if (_isDestroyed) return; _isDestroyed = true;
@@ -150,16 +193,14 @@ namespace Core.Network.Proxies
             bool posChanged = _simulatedPosition != newPosition;
             bool rotChanged = _simulatedRotation != newRotation;
 
-            // User observation: Original (X, Y, Z) might become (0, X, 0)
-            // Check if newX and newZ are close to zero, and newY is close to the old _simulatedPosition.X
             if (Math.Abs(newPosition.X) < 0.01f && 
                 Math.Abs(newPosition.Z) < 0.01f &&
-                _simulatedPosition != null && // Ensure _simulatedPosition has been initialized
+                _simulatedPosition != Vector3.Zero && // Check against default only if _simulatedPosition is initialized
                 Math.Abs(newPosition.Y - _simulatedPosition.X) < 0.01f &&
-                (_simulatedPosition.X != 0f || Math.Abs(newPosition.Y) > 0.01f) && // Avoid trivial (0,0,0) from (0,Y,Z) old pos, ensure oldX or newY is significant
-                newPosition != _simulatedPosition) // Log only if it's a change to this specific pattern
+                (_simulatedPosition.X != 0f || Math.Abs(newPosition.Y) > 0.01f) && 
+                newPosition != _simulatedPosition) 
             {
-                Logger.LogWarning($"[BaseClientProxy {EntityId}] SetSimulatedPositionAndRotation: Detected suspicious (0, oldX, 0) transform. OldPos: {_simulatedPosition}, NewPos: {newPosition}. Stack: {Environment.StackTrace}");
+                Logger.LogWarning($"[BaseClientProxy {EntityId}] SetSimulatedPositionAndRotation: Detected suspicious (0, oldX, 0) transform. OldPos: {_simulatedPosition}, NewPos: {newPosition}.");
             }
 
             _simulatedPosition = newPosition;
@@ -171,6 +212,7 @@ namespace Core.Network.Proxies
 
         protected virtual void CleanupEvents() {
             OnDestroyed = null; OnLoudDestructionSignaled = null; PositionChanged = null; RotationChanged = null;
+            _clientFloatingBehavior = null;
         }
         protected abstract void DeserializeSpecificInitialState(BinaryReader reader);
         protected abstract void DeserializeSpecificState(BinaryReader reader);

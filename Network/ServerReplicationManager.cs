@@ -11,6 +11,7 @@ using Core.Visibility;
 using Core.Session;
 using Core.Primitives;
 using Core.Time; 
+using Core.Ocean; 
 
 namespace Core.Network
 {
@@ -20,57 +21,71 @@ namespace Core.Network
         private readonly IServerNetworkLayer _networkLayer;
         private readonly VisibilityManager _visibilityManager;
         private readonly Dictionary<int, IServerProxy> _activeEntityProxies = new(); 
-        // private readonly Dictionary<int, EscadreProxy.ServerProxy> _activeEscadreProxies = new(); // REMOVED
         private readonly HashSet<int> _replicatingEntityIds = new(); 
         private bool _isDisposed = false;
         private readonly Dictionary<int, ClientConnection> _clientConnections;
         private readonly IClock _serverClock;
-        // private readonly CoreComposer _coreComposer; // REMOVED - No longer needed for specific EscadreProxy setup
+        private readonly Dictionary<int, bool> _clientOceanDataSent = new Dictionary<int, bool>(); 
 
         public ServerReplicationManager(
             Level level, IServerNetworkLayer networkLayer,
             VisibilityManager visibilityManager, Dictionary<int, ClientConnection> clientConnections,
-            IClock serverClock) // Removed CoreComposer
+            IClock serverClock) 
         {
             _level = level ?? throw new ArgumentNullException(nameof(level));
             _networkLayer = networkLayer ?? throw new ArgumentNullException(nameof(networkLayer));
             _visibilityManager = visibilityManager ?? throw new ArgumentNullException(nameof(visibilityManager));
             _clientConnections = clientConnections ?? throw new ArgumentNullException(nameof(clientConnections));
             _serverClock = serverClock ?? throw new ArgumentNullException(nameof(serverClock)); 
-            // _coreComposer = coreComposer; // REMOVED
 
             _level.OnEntityAddedEvent += HandleEntityAddedToLevel; 
             _networkLayer.OnClientMessageReceived += HandleClientMessage_GameLogic;
             _visibilityManager.EntityEnteredPvs += HandleEntityEnteredPvs;
             _visibilityManager.EntityLeftPvs += HandleEntityLeftPvs;
-
-            // No longer need to subscribe to CoreComposer.ClientRegisteredEvent for EscadreProxy management
-            // _coreComposer.ClientRegisteredEvent += HandleClientRegistered; // REMOVED
-            // _coreComposer.ClientUnregisteredEvent += HandleClientUnregistered; // REMOVED
-
+            
             Logger.Log("[ServerReplicationManager] Initialized.");
         }
+        
+        public void OnClientSessionEstablished(int gameClientId)
+        {
+            if (!_clientOceanDataSent.ContainsKey(gameClientId) || !_clientOceanDataSent[gameClientId])
+            {
+                SendOceanInitializationData(gameClientId);
+                _clientOceanDataSent[gameClientId] = true;
+            }
+        }
+        
+        private void SendOceanInitializationData(int gameClientId)
+        {
+            if (_level.OceanDataProvider == null || _level.OceanDataProvider.Settings == null)
+            {
+                Logger.LogWarning($"[SRM] Cannot send OceanInitializationData to client {gameClientId}: Server-side ocean data not configured.");
+                // Send a message indicating no ocean, or client defaults to no ocean.
+                // For now, just don't send if server isn't configured. Client will not have ocean.
+                return;
+            }
 
-        // private void HandleClientRegistered(ClientConnection clientConnection) // REMOVED
-        // {
-        // // EscadreProxy is now an IServerProxy for an Escadre entity, handled by generic flow.
-        // }
+            Logger.Log($"[SRM] Sending OceanInitializationData (Settings only) to Client {gameClientId}.");
+            _networkLayer.SendToClient(gameClientId, 0, MessageType.OceanInitializationData, writer =>
+            {
+                SerializationUtils.WriteOceanSettings(writer, _level.OceanDataProvider.Settings);
+                
+                // This is where the 768KB texture data would be sent if we were doing that.
+                // For now, client will have to use a placeholder or assume a pre-shared texture.
+                // We send a boolean to indicate if texture data *would* follow.
+                writer.Write(false); // false = no raw texture data block follows in this message.
+            });
+        }
 
-        // private void HandleClientUnregistered(ClientConnection clientConnection) // REMOVED
-        // {
-        // // EscadreProxy is an IServerProxy, cleaned up with other entity proxies.
-        // }
 
         private void HandleEntityAddedToLevel(Entity entity)
         {
             if (_isDisposed || entity.IsDead || _activeEntityProxies.ContainsKey(entity.Id)) return;
-            Logger.Log($"[SRM] Entity Added to Level: ID={entity.Id}, Type={entity.EntityType}. Creating Proxy & Registering Visibility.");
+            Logger.Log($"[SRM] Entity Added to Level: ID={entity.Id}, Type={entity.EntityType}. Creating Proxy.");
             try
             {
-                // ServerProxyFactory will correctly create EscadreProxy.ServerProxy for Escadre entities
                 IServerProxy proxy = ServerProxyFactory.CreateServerProxy(entity, _networkLayer);
                 _activeEntityProxies.Add(entity.Id, proxy);
-                // VisibilityManager.RegisterEntity(entity); // Now done by CoreComposer's Update loop
                 entity.OnDeathEvent += HandleModelEntityDeath;
             }
             catch (Exception ex) { Logger.LogError($"[SRM] Error handling Entity Added {entity.Id}: {ex.Message}\nStackTrace: {ex.StackTrace}"); }
@@ -83,7 +98,7 @@ namespace Core.Network
             entity.OnDeathEvent -= HandleModelEntityDeath; 
 
             List<int> clientsThatSawEntity = _visibilityManager.GetClientsSeeingEntity(entity.Id).ToList();
-            _visibilityManager.UnregisterEntity(entity.Id); // This should be safe to call even if already unregistered by VM update cycle
+            _visibilityManager.UnregisterEntity(entity.Id); 
 
             if (_activeEntityProxies.TryGetValue(entity.Id, out IServerProxy proxy))
             {
@@ -108,10 +123,18 @@ namespace Core.Network
         private void HandleEntityEnteredPvs(int clientId, int entityId)
         {
             if (_isDisposed) return;
+
+            if (!_clientOceanDataSent.ContainsKey(clientId) || !_clientOceanDataSent[clientId])
+            {
+                if (_clientConnections.TryGetValue(clientId, out var clientConn) &&
+                    clientConn.EscadreEntity != null && clientConn.EscadreEntity.Id == entityId)
+                {
+                    OnClientSessionEstablished(clientId); 
+                }
+            }
+            
             if (_activeEntityProxies.TryGetValue(entityId, out IServerProxy proxy))
             {
-                // This check is important because VisibilityManager might report PVS entry
-                // slightly before Level processes the death and SRM cleans up the proxy.
                 if (_level.TryGetEntity(entityId, out Entity ent) && ent.IsDead)
                 {
                     Logger.LogWarning($"[SRM] Entity {entityId} entered PVS for Client {clientId}, but is already dead in Level. Not sending CreateEntity.");
@@ -121,7 +144,6 @@ namespace Core.Network
                 Logger.Log($"[SRM] Entity {entityId} ({proxy.EntityType}) entered PVS for Client {clientId}. Sending CreateEntity.");
                 try
                 {
-                    // Context ID for CreateEntity is always the entityId itself
                     _networkLayer.SendToClient(clientId, entityId, MessageType.CreateEntity, writer =>
                     {
                         writer.Write((byte)proxy.EntityType);
@@ -148,12 +170,11 @@ namespace Core.Network
             Logger.Log($"[SRM] Entity {entityId} left PVS for Client {clientId}. Sending VanishEntity.");
             try
             {
-                // Context ID for VanishEntity is always the entityId itself
                 _networkLayer.SendToClient(clientId, entityId, MessageType.VanishEntity, writer => { /* No payload */ });
 
                 if (_replicatingEntityIds.Contains(entityId) && _activeEntityProxies.TryGetValue(entityId, out IServerProxy proxy))
                 {
-                    if (!_visibilityManager.GetClientsSeeingEntity(entityId).Any()) // Check if *no one* sees it anymore
+                    if (!_visibilityManager.GetClientsSeeingEntity(entityId).Any()) 
                     {
                         proxy.StopReplicating();
                         _replicatingEntityIds.Remove(entityId);
@@ -173,14 +194,13 @@ namespace Core.Network
                 return; 
             }
             
-            int gameClientId = sourceNetworkId; // Assuming direct mapping for game logic messages after connect
+            int gameClientId = sourceNetworkId; 
 
             if (!_clientConnections.TryGetValue(gameClientId, out ClientConnection clientConnection))
             {
                 Logger.LogWarning($"[SRM] Received game logic message (Type: {messageType}) from unestablished/unknown GameClient ID: {gameClientId} (derived from SourceNetworkID: {sourceNetworkId}). Ignoring.");
                 return;
             }
-            // Ensure the client still has an active Escadre entity for commands that require it
             bool clientHasActiveEscadre = clientConnection.EscadreEntity != null && !clientConnection.EscadreEntity.IsDead;
 
 
@@ -189,26 +209,22 @@ namespace Core.Network
 
             switch (messageType)
             {
-                case MessageType._ClientSyncState: // contextEntityId is the entity being synced
+                case MessageType._ClientSyncState: 
                     if (_activeEntityProxies.TryGetValue(contextEntityId, out IServerProxy proxy))
                     {
-                        // Checksum and send correction state if needed
                         if (proxy.CheckClientSyncState(reader))
                         {
-                            // Context ID for UpdateState is the entityId
                             _networkLayer.SendToClient(gameClientId, contextEntityId, MessageType.UpdateState, proxy.SerializeCorrectionState);
                         }
                     }
                     else { Logger.LogWarning($"[SRM CId={gameClientId}] _ClientSyncState for unknown EntityProxy ID: {contextEntityId}."); }
                     break;
-
-                // Escadre General Commands (contextEntityId is 0, server uses clientConnection.EscadreEntity)
                 case MessageType._SetCourse: 
                     if (!clientHasActiveEscadre) { Logger.LogWarning($"[SRM CId={gameClientId}] _SetCourse ignored, client has no active escadre."); break; }
                     try { clientConnection.RequestSetCourse(SerializationUtils.ReadVector2(reader), currentTime); } 
                     catch (Exception ex) { Logger.LogError($"[SRM CId={gameClientId}] Error processing _SetCourse: {ex.Message}"); } 
                     break;
-                case MessageType._AttackEscadre: // Payload is targetEscadreEntityId
+                case MessageType._AttackEscadre: 
                     if (!clientHasActiveEscadre) { Logger.LogWarning($"[SRM CId={gameClientId}] _AttackEscadre ignored, client has no active escadre."); break; }
                     try { clientConnection.RequestAttackEscadre(reader.ReadInt32(), currentTime); } 
                     catch (Exception ex) { Logger.LogError($"[SRM CId={gameClientId}] Error processing _AttackEscadre: {ex.Message}"); } 
@@ -218,8 +234,6 @@ namespace Core.Network
                     try { clientConnection.RequestCancelAttack(); } 
                     catch (Exception ex) { Logger.LogError($"[SRM CId={gameClientId}] Error processing _CancelAttack: {ex.Message}"); } 
                     break;
-                
-                // Shop & Formation Commands (contextEntityId is 0)
                 case MessageType._RequestBuyShip:
                     if (!clientHasActiveEscadre) { Logger.LogWarning($"[SRM CId={gameClientId}] _RequestBuyShip ignored, client has no active escadre."); break; }
                     try
@@ -270,8 +284,6 @@ namespace Core.Network
             if (_networkLayer != null) _networkLayer.OnClientMessageReceived -= HandleClientMessage_GameLogic;
             if (_visibilityManager != null) { _visibilityManager.EntityEnteredPvs -= HandleEntityEnteredPvs; _visibilityManager.EntityLeftPvs -= HandleEntityLeftPvs; }
             if (_level != null) _level.OnEntityAddedEvent -= HandleEntityAddedToLevel;
-            // if (_coreComposer != null) { _coreComposer.ClientRegisteredEvent -= HandleClientRegistered; _coreComposer.ClientUnregisteredEvent -= HandleClientUnregistered; } // REMOVED
-
 
             var entityProxyIds = new List<int>(_activeEntityProxies.Keys);
             foreach (var id in entityProxyIds) {
@@ -281,14 +293,10 @@ namespace Core.Network
                         entity.OnDeathEvent -= HandleModelEntityDeath; 
                     }
                 }
-                // _visibilityManager?.UnregisterEntity(id); // Unregistration from VM now happens on entity death or CoreComposer.Update
             }
             _replicatingEntityIds.Clear();
             _activeEntityProxies.Clear();
-
-            // No _activeEscadreProxies to clear
-            // _activeEscadreProxies.Clear(); // REMOVED
-
+            _clientOceanDataSent.Clear();
             Logger.Log("[ServerReplicationManager] Dispose complete.");
         }
     }

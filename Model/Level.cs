@@ -4,6 +4,8 @@ using Core.Logging;
 using Core.Model;
 using System.Linq;
 using System; // Required for .Any() and .OfType<T>()
+using Core.Ocean; 
+using Core.Primitives; 
 
 namespace Core.Model
 {
@@ -15,22 +17,36 @@ namespace Core.Model
         private Queue<int> _idsFreed = new();
         private int _maxIdAllocated = 0;
 
-        // private Dictionary<int, Escadre> _escadresByOwnerId = new (); // Removed: Escadres are now Entities
         public Shop GameShop { get; private set; } 
 
         public delegate void OnEntityAdded(Entity entity);
         public event OnEntityAdded OnEntityAddedEvent;
 
-        // Event raised when an entity is definitively removed from the level's active list
         public event Action<Entity> OnEntityRemovedEvent;
 
         private float _currentTime = 0f;
         public float CurrentTime => _currentTime;
 
+        public IOceanDataProvider OceanDataProvider { get; private set; }
+        // OceanSettings is now part of IOceanDataProvider.Settings
+        // public OceanSettings OceanSettings { get; private set; }
 
-        public Level()
+
+        public Level(IOceanDataProvider oceanDataProvider = null) // OceanSettings removed from constructor
         {
             _entities = new List<Entity>();
+            
+            OceanDataProvider = oceanDataProvider; 
+            if (OceanDataProvider == null)
+            {
+                Logger.LogWarning("[Level] No IOceanDataProvider provided. Ocean effects will be disabled.");
+            }
+            else
+            {
+                OceanSettings settings = OceanDataProvider.Settings; // Get settings from provider
+                Logger.Log($"[Level] Ocean Initialized. TileSize: {settings.TextureTileWorldSize}, LoopDur: {settings.TextureTimeLoopDuration}, Scale: {settings.DisplacementScale}");
+            }
+
             InitializeShop(); 
         }
 
@@ -49,21 +65,12 @@ namespace Core.Model
         {
             _currentTime += delta;
 
-            // Update individual entities (ships, projectiles, escadres, etc.)
-            // Iterate a copy because an entity's Update might lead to adding/removing other entities
             var entitiesToUpdate = _entities.ToList(); 
             foreach (Entity entity in entitiesToUpdate)
             {
-                // Ensure entity wasn't removed during this same update tick by a previous entity's update
                 if (!_entities.Contains(entity) || entity.IsDead) continue; 
                 entity.Update(delta);
             }
-
-            // Escadre updates are now handled by the generic Entity.Update loop
-            // foreach(var escadre in _escadresByOwnerId.Values) // Removed
-            // {
-            //    escadre.Update(delta, _currentTime);
-            // }
 
             RemoveRemovedEntities();
             AddAddedEntities();
@@ -82,31 +89,13 @@ namespace Core.Model
 
         public void Destroy()
         {
-            // Kill all entities, including Escadres.
-            // Escadre.Death() or Escadre.ObligatoryOnRemove() should handle disbanding their ships.
-            var entitiesToDestroy = new List<Entity>(_entities); // Iterate a copy for modification
+            var entitiesToDestroy = new List<Entity>(_entities); 
             foreach (Entity entity in entitiesToDestroy)
             {
-                entity.Kill(true); // Kill silently
+                entity.Kill(true); 
             }
-            // Ensure _toRemove processes these killed entities
             RemoveRemovedEntities(); 
-            // AddAddedEntities might try to add entities that were queued but whose "creator" was destroyed.
-            // Clear _toAdd to prevent issues, or ensure AddAddedEntities checks IsDead.
             _toAdd.Clear();
-
-
-            // The old escadre-specific cleanup is no longer needed here as Escadres are entities.
-            // var escadreOwners = new List<int>(_escadresByOwnerId.Keys);
-            // foreach(var ownerId in escadreOwners)
-            // {
-            // if (_escadresByOwnerId.TryGetValue(ownerId, out var escadre))
-            // {
-            // escadre.Disband(true); 
-            // }
-            // RemoveEscadre(ownerId); 
-            // }
-            // _escadresByOwnerId.Clear(); 
         }
 
         public IEnumerable<Entity> GetAllEntities() {
@@ -119,8 +108,6 @@ namespace Core.Model
         }
 
         public bool TryGetEntity(int entityId, out Entity result) {
-            // Consider using a Dictionary<int, Entity> for _entities if performance becomes an issue.
-            // For now, List iteration is fine for moderate numbers of entities.
             for (int i = 0; i < _entities.Count; i++) {
                 if (_entities[i].Id == entityId) {
                     result = _entities[i];
@@ -131,10 +118,6 @@ namespace Core.Model
             return false;
         }
         
-        // Replaces old AddEscadre. Escadres are added via AddEntity.
-        // public bool AddEscadre(Escadre escadre) // REMOVED
-
-        // Replaces old TryGetEscadre
         public bool TryGetEscadreForOwner(int ownerClientId, out Escadre escadre)
         {
             escadre = _entities.OfType<Escadre>().FirstOrDefault(e => e.OwnerClientId == ownerClientId && !e.IsDead);
@@ -152,16 +135,13 @@ namespace Core.Model
             return false;
         }
 
-        // Replaces old RemoveEscadre. Escadres are removed by finding them as entities and calling entity.Kill().
-        // public bool RemoveEscadre(int ownerClientId) // REMOVED
-
         protected void AddAddedEntities()
         {
             if (!_toAdd.Any()) return;
 
             foreach (Entity entity in _toAdd)
             {
-                if (entity.IsDead) // If entity was killed before it was even added
+                if (entity.IsDead) 
                 {
                     _idsFreed.Enqueue(entity.Id); 
                     continue;
@@ -175,8 +155,6 @@ namespace Core.Model
         
         private void HandleEntityDeathForLevelCleanup(Entity entity)
         {
-            // This is called when an entity's IsDead becomes true and OnDeathEvent fires.
-            // The entity is already marked as dead. We just need to schedule its removal from the _entities list.
             RemoveEntity(entity);
         }
 
@@ -189,7 +167,7 @@ namespace Core.Model
             {
                 entity.OnDeathEvent -= HandleEntityDeathForLevelCleanup; 
                 bool removed = _entities.Remove(entity); 
-                if (removed) // Only invoke if it was actually in the list and removed
+                if (removed) 
                 {
                     OnEntityRemovedEvent?.Invoke(entity); 
                 }
