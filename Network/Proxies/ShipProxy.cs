@@ -81,12 +81,13 @@ namespace Core.Network.Proxies
             public event Action StatsChanged; 
 
             private Vector2? _currentMovementTarget;
-            private bool _isMovingClientSide = false; 
+            private bool _isMovingClientSide = false;
 
             public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType, ClientLevel clientLevel)
-                : base(entityId, concreteType, clientLevel) 
+                : base(entityId, concreteType, clientLevel)
             {
                 _clientFloatingBehavior = new DefaultFloatingBehavior();
+                _clientFloatingBehavior.HorizontalInfluence = 0f;
             }
 
             protected override void DeserializeSpecificInitialState(BinaryReader reader) {

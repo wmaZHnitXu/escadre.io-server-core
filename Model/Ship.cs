@@ -29,13 +29,14 @@ namespace Core.Model
             : base(level, maxHealth)
         {
             OwningEscadre = ownerEscadre ?? throw new ArgumentNullException(nameof(ownerEscadre));
-            OwningEscadreClientId = ownerEscadre.OwnerClientId; 
+            OwningEscadreClientId = ownerEscadre.OwnerClientId;
             Position = initialPosition; // This might be adjusted by ocean if spawned directly on it.
-            Rotation = Quaternion.Identity; 
+            Rotation = Quaternion.Identity;
             IsMoving = false;
             CurrentSpeed = 0f;
 
-            this.FloatingBehavior = new DefaultFloatingBehavior(); 
+            this.FloatingBehavior = new DefaultFloatingBehavior();
+            this.FloatingBehavior.HorizontalInfluence = 0f;
         }
 
         public override void Update(float delta)
