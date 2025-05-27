@@ -57,20 +57,14 @@ namespace Core.Model
 
             if (FloatingBehavior != null && _level.OceanDataProvider != null)
             {
-                float sampleX = Position.X;
-                float sampleZ = Position.Z;
-
-                Vector3 oceanDisplacement = _level.OceanDataProvider.GetDisplacement(sampleX, sampleZ, _level.CurrentTime);
-                Vector3 oceanNormal = _level.OceanDataProvider.GetNormal(sampleX, sampleZ, _level.CurrentTime);
-                Vector3 targetSurfacePoint = new Vector3(
-                    sampleX + oceanDisplacement.X, 
-                    oceanDisplacement.Y,           
-                    sampleZ + oceanDisplacement.Z  
+                FloatingBehavior.ApplyFloating(
+                    this.Position, 
+                    this.Rotation, 
+                    _level.CurrentTime, // Pass current time from level
+                    delta, 
+                    out Vector3 newPos, 
+                    out Quaternion newRot
                 );
-                
-                Vector3 newPos;
-                Quaternion newRot;
-                FloatingBehavior.ApplyFloating(this.Position, this.Rotation, targetSurfacePoint, oceanNormal, delta, out newPos, out newRot);
                 this.Position = newPos;
                 this.Rotation = newRot;
             }

@@ -1,6 +1,8 @@
 // File: Scripts/Server/Core/Model/DefaultShip.cs
 using Core.Primitives;
 using Core.Logging;
+using Core.Ocean;
+using System.Collections.Generic;
 
 namespace Core.Model
 {
@@ -19,6 +21,30 @@ namespace Core.Model
             MaxSpeed = 4f;
             TurnRate = 75f;
 
+            // Define floating points for this ship model (local offsets)
+            // Example: A simple box shape with 4 points: bow, stern, port, starboard
+            // Assuming ship length is ~2 units (Z), width ~1 unit (X)
+            var floatingPoints = new List<Vector3>
+            {
+                new Vector3(0f, 0f, 1.0f),   // Bow
+                new Vector3(0f, 0f, -1.0f),  // Stern
+                new Vector3(0.5f, 0f, 0f),   // Starboard mid
+                new Vector3(-0.5f, 0f, 0f)   // Port mid
+            };
+
+            // If OceanDataProvider is available in the level, create the behavior
+            if (level.OceanDataProvider != null)
+            {
+                this.FloatingBehavior = new MultiPointFloatingBehavior(floatingPoints, level.OceanDataProvider);
+            }
+            else // Fallback or if ocean is disabled server-side
+            {
+                // Optionally, log a warning or use a null/dummy behavior
+                // this.FloatingBehavior = null; 
+                Logger.LogWarning($"[DefaultShip ID:{this.Id}] OceanDataProvider not available in Level. FloatingBehavior not initialized.");
+            }
+
+
             // Add cannons
             // Cannon 1 (Front-Left)
             var cannon1 = new DefaultCannon(
@@ -29,7 +55,6 @@ namespace Core.Model
                 attackRange: 18f,
                 attackDamage: 5f,
                 attackCooldown: 2.0f
-                // ProjectileSpawnOffset will use default from DefaultCannon constructor
             );
             _cannons.Add(cannon1);
 
@@ -45,7 +70,7 @@ namespace Core.Model
             );
             _cannons.Add(cannon2);
 
-            Logger.Log($"[DefaultShip ID pending:{this.Id}] Created for Escadre {ownerEscadre.OwnerClientId}. HP: {CurrentHealth}/{MaxHealth}. Added {Cannons.Count} cannons.");
+            // Logger.Log($"[DefaultShip ID pending:{this.Id}] Created for Escadre {ownerEscadre.OwnerClientId}. HP: {CurrentHealth}/{MaxHealth}. Added {Cannons.Count} cannons.");
         }
 
         public override void PerformUpgrade()
@@ -57,17 +82,8 @@ namespace Core.Model
             MaxSpeed += 0.5f;
             TurnRate += 10f;
 
-            // Upgrade cannons
-            foreach (var cannon in _cannons)
-            {
-                // Example upgrade: Increase damage and range, reduce cooldown slightly
-                // Note: This directly modifies protected setters. Consider dedicated upgrade methods on Cannon if more complex.
-                // For now, let's assume DefaultCannon properties can be modified if it had public setters or an UpgradeCannon method.
-                // Since AttackDamage etc. on DefaultCannon have protected setters, we can't directly modify them here.
-                // To make them upgradable, DefaultCannon would need an Upgrade() method or public setters for relevant stats.
-                // For this example, let's imagine DefaultCannon has an UpgradeCannon() method.
-                // cannon.UpgradeCannon(damageBoost: 2f, rangeBoost: 2f, cooldownReduction: 0.2f);
-            }
+            // Cannons upgrade logic would go here if DefaultCannon had an Upgrade() method
+            // foreach (var cannon in _cannons) { cannon.Upgrade(); }
 
             Logger.Log($"[DefaultShip {Id}] Upgraded! New Stats -> HP: {MaxHealth}, Spd: {MaxSpeed}, Turn: {TurnRate}. Cannons may also be upgraded.");
         }

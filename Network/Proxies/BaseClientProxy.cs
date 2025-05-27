@@ -37,6 +37,7 @@ namespace Core.Network.Proxies
         { 
             EntityId = entityId;
             OwningClientLevel = clientLevel ?? throw new ArgumentNullException(nameof(clientLevel));
+            // _clientFloatingBehavior is initialized lazily in Update() or by derived classes
         }
 
         public virtual void Initialize(BinaryReader reader)
@@ -119,27 +120,24 @@ namespace Core.Network.Proxies
 
         public virtual void Update(float deltaTime)
         {
-            if (!_isDestroyed && _clientFloatingBehavior != null && OwningClientLevel.IsOceanInitialized)
-            {
-                float sampleX = _simulatedPosition.X;
-                float sampleZ = _simulatedPosition.Z;
+            if (_isDestroyed) return;
 
-                Vector3 oceanDisplacement = OwningClientLevel.OceanDataProvider.GetDisplacement(sampleX, sampleZ, OwningClientLevel.CurrentTime);
-                Vector3 oceanNormal = OwningClientLevel.OceanDataProvider.GetNormal(sampleX, sampleZ, OwningClientLevel.CurrentTime);
-                Vector3 targetSurfacePoint = new Vector3(
-                    sampleX + oceanDisplacement.X,
-                    oceanDisplacement.Y,
-                    sampleZ + oceanDisplacement.Z
+            // Lazy initialization or re-check of floating behavior
+            // This is a generic BaseClientProxy, specific derived proxies like ShipProxy
+            // will be responsible for defining their floating points and instantiating
+            // the correct IFloatingBehavior (e.g., MultiPointFloatingBehavior).
+            // For now, this base class just calls it if it's already set.
+            if (_clientFloatingBehavior != null && OwningClientLevel.IsOceanInitialized)
+            {
+                _clientFloatingBehavior.ApplyFloating(
+                    _simulatedPosition, 
+                    _simulatedRotation, 
+                    OwningClientLevel.CurrentTime, 
+                    deltaTime, 
+                    out Vector3 newSimPosWithFloat, 
+                    out Quaternion newSimRotWithFloat
                 );
-                
-                Vector3 newSimPos;
-                Quaternion newSimRot;
-                _clientFloatingBehavior.ApplyFloating(_simulatedPosition, _simulatedRotation, targetSurfacePoint, oceanNormal, deltaTime, out newSimPos, out newSimRot);
-                
-                if (newSimPos != _simulatedPosition || newSimRot != _simulatedRotation)
-                {
-                    SetSimulatedPositionAndRotation(newSimPos, newSimRot);
-                }
+                SetSimulatedPositionAndRotation(newSimPosWithFloat, newSimRotWithFloat);
             }
         }
 
@@ -190,7 +188,7 @@ namespace Core.Network.Proxies
 
         protected virtual void CleanupEvents() {
             OnDestroyed = null; OnLoudDestructionSignaled = null; PositionChanged = null; RotationChanged = null;
-            _clientFloatingBehavior = null;
+            _clientFloatingBehavior = null; // Explicitly nullify
         }
         protected abstract void DeserializeSpecificInitialState(BinaryReader reader);
         protected abstract void DeserializeSpecificState(BinaryReader reader);

@@ -7,6 +7,7 @@ using Core.Logging;
 using Core.Primitives;
 using Core.Client; 
 using Core.Ocean; 
+using System.Collections.Generic; // Required for List
 
 namespace Core.Network.Proxies
 {
@@ -83,11 +84,20 @@ namespace Core.Network.Proxies
             private Vector2? _currentMovementTarget;
             private bool _isMovingClientSide = false;
 
+            // Define floating points for client-side ship visuals
+            private readonly List<Vector3> _clientShipFloatingPoints = new List<Vector3>
+            {
+                new Vector3(0f, 0f, 1.0f),   // Bow
+                new Vector3(0f, 0f, -1.0f),  // Stern
+                new Vector3(0.5f, 0f, 0f),   // Starboard mid
+                new Vector3(-0.5f, 0f, 0f)   // Port mid
+            };
+
+
             public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType, ClientLevel clientLevel)
                 : base(entityId, concreteType, clientLevel)
             {
-                _clientFloatingBehavior = new DefaultFloatingBehavior();
-                _clientFloatingBehavior.HorizontalInfluence = 0f;
+                // _clientFloatingBehavior will be lazy-initialized in Update()
             }
 
             protected override void DeserializeSpecificInitialState(BinaryReader reader) {
@@ -157,12 +167,12 @@ namespace Core.Network.Proxies
 
                 if (catchUpDeltaTime > 0.001f && _currentMovementTarget.HasValue) 
                 {
-                    var catchUpResult = SimulatePlanarMovementStep( // Renamed for clarity
+                    var catchUpResult = SimulatePlanarMovementStep(
                         serverPosAtCommand, serverRotAtCommand, serverSpeedAtCommand,
                         _currentMovementTarget, MaxSpeed, TurnRate, catchUpDeltaTime, true 
                     );
-                    predictedPos = catchUpResult.newPos; // This is XZ updated, Y from server
-                    predictedRot = catchUpResult.newRot; // This is primarily Yaw
+                    predictedPos = catchUpResult.newPos; 
+                    predictedRot = catchUpResult.newRot; 
                     predictedSpeed = catchUpResult.newSpeed;
                     stillMovingAfterCatchUp = catchUpResult.stillMoving;
                 }
@@ -184,10 +194,9 @@ namespace Core.Network.Proxies
             {
                 Vector3 nextPosXZ = new Vector3(currentFullPosition.X, 0, currentFullPosition.Z); 
                 
-                // Extract current planar forward from full rotation to get current yaw for ships
                 Vector3 currentPlanarForwardVec = (currentFullRotation * Vector3.Forward);
-                currentPlanarForwardVec = new Vector3(currentPlanarForwardVec.X, 0.0f, currentPlanarForwardVec.Z);
-                Quaternion currentYawOrientation = Quaternion.LookRotation(currentPlanarForwardVec.NormalizedSafe(Vector3.Forward), Vector3.Up);
+                currentPlanarForwardVec = new Vector3(currentPlanarForwardVec.X, 0.0f, currentPlanarForwardVec.Z).NormalizedSafe(Vector3.Forward);
+                Quaternion currentYawOrientation = Quaternion.LookRotation(currentPlanarForwardVec, Vector3.Up);
                 Quaternion nextYaw = currentYawOrientation;
 
                 float nextSpeed = currentSpeedParam;
@@ -198,6 +207,7 @@ namespace Core.Network.Proxies
                     if (nextSpeed > 0) nextSpeed = Math.Max(0, nextSpeed - (currentMaxSpeed * 2f * deltaTime)); 
                     else nextSpeed = 0f;
                     stillNeedsToMove = false;
+                    // Return Y from input, as this function only simulates XZ and Yaw
                     return (new Vector3(nextPosXZ.X, currentFullPosition.Y, nextPosXZ.Z), nextYaw, nextSpeed, stillNeedsToMove);
                 }
 
@@ -242,73 +252,80 @@ namespace Core.Network.Proxies
             {
                 if (deltaTime <= 0f || _isDestroyed) return;
 
-                Vector3 newSimPos = _simulatedPosition;
-                Quaternion newSimRot = _simulatedRotation; 
-                float newSimSpeed = _clientSimulatedSpeed;
-                bool stillMovingPlanar = _isMovingClientSide;
+                Vector3 preFloatPosition = _simulatedPosition;
+                Quaternion preFloatRotation = _simulatedRotation; 
+                float preFloatSpeed = _clientSimulatedSpeed;
+                bool preFloatMovingPlanar = _isMovingClientSide;
 
 
                 // 1. Simulate Planar (XZ) Movement and Yaw
-                if (!_isMovingClientSide || !_currentMovementTarget.HasValue)
+                if (!preFloatMovingPlanar || !_currentMovementTarget.HasValue)
                 {
-                    if (newSimSpeed > 0)
+                    if (preFloatSpeed > 0)
                     {
-                        newSimSpeed = Math.Max(0, newSimSpeed - (MaxSpeed * 2f * deltaTime));
+                        preFloatSpeed = Math.Max(0, preFloatSpeed - (MaxSpeed * 2f * deltaTime));
                     }
-                    else { newSimSpeed = 0f; }
-                    stillMovingPlanar = false;
+                    else { preFloatSpeed = 0f; }
+                    preFloatMovingPlanar = false;
                 }
                 else 
                 {
                     var planarSimResult = SimulatePlanarMovementStep(
-                        newSimPos,      
-                        newSimRot,      
-                        newSimSpeed,    
+                        preFloatPosition,      
+                        preFloatRotation,      
+                        preFloatSpeed,    
                         _currentMovementTarget, 
                         MaxSpeed, 
                         TurnRate, 
                         deltaTime, 
-                        _isMovingClientSide
+                        preFloatMovingPlanar
                     );
 
-                    newSimPos = new Vector3(planarSimResult.newPos.X, newSimPos.Y, planarSimResult.newPos.Z); 
-                    newSimRot = planarSimResult.newRot; 
-                    newSimSpeed = planarSimResult.newSpeed;
-                    stillMovingPlanar = planarSimResult.stillMoving;
+                    preFloatPosition = planarSimResult.newPos; 
+                    preFloatRotation = planarSimResult.newRot; 
+                    preFloatSpeed = planarSimResult.newSpeed;
+                    preFloatMovingPlanar = planarSimResult.stillMoving;
                 }
                 
-                _isMovingClientSide = stillMovingPlanar;
+                _isMovingClientSide = preFloatMovingPlanar;
                 if (!_isMovingClientSide) {
                      _currentMovementTarget = null; 
                 }      
 
-                // 2. Apply Floating Behavior 
-                if (_clientFloatingBehavior != null && OwningClientLevel.IsOceanInitialized)
-                {
-                    float sampleX = newSimPos.X; // Use the XZ from planar sim
-                    float sampleZ = newSimPos.Z;
+                // Store pre-floating state before applying ocean effects
+                Vector3 currentSimPos = preFloatPosition;
+                Quaternion currentSimRot = preFloatRotation;
+                float currentSimSpeed = preFloatSpeed;
 
-                    Vector3 oceanDisplacement = OwningClientLevel.OceanDataProvider.GetDisplacement(sampleX, sampleZ, OwningClientLevel.CurrentTime);
-                    Vector3 oceanNormal = OwningClientLevel.OceanDataProvider.GetNormal(sampleX, sampleZ, OwningClientLevel.CurrentTime);
-                    Vector3 targetSurfacePoint = new Vector3(
-                        sampleX + oceanDisplacement.X,
-                        oceanDisplacement.Y, 
-                        sampleZ + oceanDisplacement.Z
+                // 2. Apply Floating Behavior 
+                if (OwningClientLevel.IsOceanInitialized)
+                {
+                    if (_clientFloatingBehavior == null) // Lazy initialization
+                    {
+                        _clientFloatingBehavior = new MultiPointFloatingBehavior(_clientShipFloatingPoints, OwningClientLevel.OceanDataProvider);
+                        // Or potentially DefaultFloatingBehavior if this entity type shouldn't use multipoint
+                        // _clientFloatingBehavior = new DefaultFloatingBehavior(OwningClientLevel.OceanDataProvider);
+                        Logger.Log($"[ShipProxy.Client {EntityId}] Initialized MultiPointFloatingBehavior.");
+                    }
+                    
+                    _clientFloatingBehavior.ApplyFloating(
+                        currentSimPos, // Pass the result of planar sim
+                        currentSimRot, // Pass the result of planar sim
+                        OwningClientLevel.CurrentTime, 
+                        deltaTime, 
+                        out Vector3 finalPosWithFloat, 
+                        out Quaternion finalRotWithFloat
                     );
                     
-                    Vector3 finalPos;
-                    Quaternion finalRot;
-                    _clientFloatingBehavior.ApplyFloating(newSimPos, newSimRot, targetSurfacePoint, oceanNormal, deltaTime, out finalPos, out finalRot);
-                    
-                    newSimPos = finalPos; 
-                    newSimRot = finalRot; 
+                    currentSimPos = finalPosWithFloat; 
+                    currentSimRot = finalRotWithFloat; 
                 }
                 
-                SetSimulatedPositionAndRotation(newSimPos, newSimRot);
+                SetSimulatedPositionAndRotation(currentSimPos, currentSimRot);
                 
-                if (Math.Abs(_clientSimulatedSpeed - newSimSpeed) > float.Epsilon)
+                if (Math.Abs(_clientSimulatedSpeed - currentSimSpeed) > float.Epsilon) // Compare with speed *before* floating potentially modified it
                 {
-                    _clientSimulatedSpeed = newSimSpeed;
+                    _clientSimulatedSpeed = currentSimSpeed;
                     CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
                 }
             }
