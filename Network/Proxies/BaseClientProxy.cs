@@ -26,6 +26,8 @@ namespace Core.Network.Proxies
 
         public ClientLevel OwningClientLevel { get; } 
 
+        // Made protected so derived classes can initialize and use it.
+        // Specific proxies like ShipProxy will instantiate their specific IFloatingBehavior.
         protected IFloatingBehavior _clientFloatingBehavior; 
 
         public event Action OnDestroyed;
@@ -37,7 +39,6 @@ namespace Core.Network.Proxies
         { 
             EntityId = entityId;
             OwningClientLevel = clientLevel ?? throw new ArgumentNullException(nameof(clientLevel));
-            // _clientFloatingBehavior is initialized lazily in Update() or by derived classes
         }
 
         public virtual void Initialize(BinaryReader reader)
@@ -74,7 +75,7 @@ namespace Core.Network.Proxies
                         break;
                 }
             }
-            catch (Exception ex) { Logger.LogError($"[ClientProxy {EntityId}] Error processing message {messageType}: {ex.Message}"); }
+            catch (Exception ex) { Logger.LogError($"[ClientProxy {EntityId}] Error processing message {messageType}: {ex.Message}\nStackTrace: {ex.StackTrace}"); }
         }
 
         protected virtual void DeserializeAndUpdateState(BinaryReader reader) 
@@ -82,6 +83,8 @@ namespace Core.Network.Proxies
             var serverAuthPosition = SerializationUtils.ReadVector3(reader);
             var serverAuthRotation = SerializationUtils.ReadQuaternion(reader);
 
+            // When receiving an UpdateState, we should generally snap to the server's state.
+            // The client-side simulation (including floating) will then proceed from this corrected state.
             SetSimulatedPositionAndRotation(serverAuthPosition, serverAuthRotation);
 
             DeserializeSpecificState(reader);
@@ -108,6 +111,7 @@ namespace Core.Network.Proxies
                 case BaseProxyEventType.Teleported:
                     Vector3 newPos = SerializationUtils.ReadVector3(reader);
                     Quaternion newRot = SerializationUtils.ReadQuaternion(reader);
+                    // For teleport, we snap directly. Floating behavior will apply from this new state in the next Update.
                     SetSimulatedPositionAndRotation(newPos, newRot); 
                     Logger.Log($"[BaseClientProxy {EntityId}] Handled Teleported event. New Pos: {newPos}, New Rot: {newRot}");
                     break;
@@ -122,23 +126,9 @@ namespace Core.Network.Proxies
         {
             if (_isDestroyed) return;
 
-            // Lazy initialization or re-check of floating behavior
-            // This is a generic BaseClientProxy, specific derived proxies like ShipProxy
-            // will be responsible for defining their floating points and instantiating
-            // the correct IFloatingBehavior (e.g., MultiPointFloatingBehavior).
-            // For now, this base class just calls it if it's already set.
-            if (_clientFloatingBehavior != null && OwningClientLevel.IsOceanInitialized)
-            {
-                _clientFloatingBehavior.ApplyFloating(
-                    _simulatedPosition, 
-                    _simulatedRotation, 
-                    OwningClientLevel.CurrentTime, 
-                    deltaTime, 
-                    out Vector3 newSimPosWithFloat, 
-                    out Quaternion newSimRotWithFloat
-                );
-                SetSimulatedPositionAndRotation(newSimPosWithFloat, newSimRotWithFloat);
-            }
+            // BaseClientProxy does NOT implement generic floating.
+            // Derived proxies like ShipProxy are responsible for their own floating logic
+            // because they know their specific floating points and how to combine movement + floating.
         }
 
         public void NotifyDestroyed() {
@@ -169,14 +159,15 @@ namespace Core.Network.Proxies
             bool posChanged = _simulatedPosition != newPosition;
             bool rotChanged = _simulatedRotation != newRotation;
 
+            // Keep the suspicious transform log if it's still relevant
             if (Math.Abs(newPosition.X) < 0.01f && 
                 Math.Abs(newPosition.Z) < 0.01f &&
                 _simulatedPosition != Vector3.Zero && 
-                Math.Abs(newPosition.Y - _simulatedPosition.X) < 0.01f &&
+                Math.Abs(newPosition.Y - _simulatedPosition.X) < 0.01f && // This condition seems odd: Y vs old X
                 (_simulatedPosition.X != 0f || Math.Abs(newPosition.Y) > 0.01f) && 
                 newPosition != _simulatedPosition) 
             {
-                Logger.LogWarning($"[BaseClientProxy {EntityId}] SetSimulatedPositionAndRotation: Detected suspicious (0, oldX, 0) transform. OldPos: {_simulatedPosition}, NewPos: {newPosition}.");
+                Logger.LogWarning($"[BaseClientProxy {EntityId}] SetSimulatedPositionAndRotation: Detected suspicious (0, val, 0)-like transform. OldPos: {_simulatedPosition}, NewPos: {newPosition}.");
             }
 
             _simulatedPosition = newPosition;
@@ -188,7 +179,12 @@ namespace Core.Network.Proxies
 
         protected virtual void CleanupEvents() {
             OnDestroyed = null; OnLoudDestructionSignaled = null; PositionChanged = null; RotationChanged = null;
-            _clientFloatingBehavior = null; // Explicitly nullify
+            
+            // If _clientFloatingBehavior is owned by this base class and needs disposal.
+            // However, it's better if derived classes manage their specific behavior instances.
+            // For now, if it's just a reference, nullifying is fine.
+            // If it implemented IDisposable, (e.g. (_clientFloatingBehavior as IDisposable)?.Dispose(); )
+            _clientFloatingBehavior = null; 
         }
         protected abstract void DeserializeSpecificInitialState(BinaryReader reader);
         protected abstract void DeserializeSpecificState(BinaryReader reader);

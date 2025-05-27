@@ -25,6 +25,9 @@ namespace Core.Model
         protected readonly List<DefaultCannon> _cannons = new List<DefaultCannon>();
         public IReadOnlyList<DefaultCannon> Cannons => _cannons.AsReadOnly();
 
+        public float CollectableDetectionRange { get; protected set; } = 7.0f;
+        private CollectableFloatingEntity _targetedCollectable = null; 
+
         protected Ship(Level level, Escadre ownerEscadre, Vector3 initialPosition, float maxHealth)
             : base(level, maxHealth)
         {
@@ -34,23 +37,26 @@ namespace Core.Model
             Rotation = Quaternion.Identity;
             IsMoving = false;
             CurrentSpeed = 0f;
-
-            // DefaultFloatingBehavior is set by concrete ship class, e.g. DefaultShip constructor
-            // This ensures that derived classes can specify their own floating points.
         }
 
         public override void Update(float delta)
         {
-            // Entity.Update (which handles FloatingBehavior) will be called first by DestructibleEntity's base.Update().
-            // This will adjust Position.Y and the full Rotation based on ocean.
-            base.Update(delta); 
+            base.Update(delta); // This calls Entity.Update -> FloatingBehavior.ApplyFloating
+                                // this.Position and this.Rotation are now updated by FloatingBehavior
 
-            if (IsDead) return;
+            if (IsDead)
+            {
+                if (_targetedCollectable != null && _targetedCollectable.CollectingShip == this)
+                {
+                    _targetedCollectable.Unclaim();
+                    _targetedCollectable = null;
+                }
+                return;
+            }
 
-            // UpdateMovement then handles planar (XZ) movement and Yaw adjustments.
-            // It reads the (potentially ocean-modified) Position and Rotation,
-            // but primarily acts on XZ components and Yaw for its logic.
-            UpdateMovement(delta);
+            // Pass the current, ocean-affected rotation to UpdateMovement
+            UpdateMovement(delta, this.Rotation); 
+            UpdateCollectablesInteraction(delta);
         }
 
         public void SetMovementTarget(Vector2? targetWorldPosition, float serverTime)
@@ -60,14 +66,7 @@ namespace Core.Model
 
             _movementTargetPosition = targetWorldPosition;
 
-            if (targetWorldPosition.HasValue)
-            {
-                IsMoving = true;
-            }
-            else
-            {
-                 IsMoving = false; 
-            }
+            IsMoving = targetWorldPosition.HasValue; // Set IsMoving based on whether a target exists
 
             if (changed || targetWorldPosition.HasValue)
             {
@@ -75,12 +74,9 @@ namespace Core.Model
             }
         }
 
-
-        protected virtual void UpdateMovement(float deltaTime)
+        // Method signature changed to accept currentFullRotationFromOcean
+        protected virtual void UpdateMovement(float deltaTime, Quaternion currentFullRotationFromOcean)
         {
-            // This movement logic primarily controls the ship's XZ position and its Yaw (rotation around Y-axis).
-            // The FloatingBehavior (called in base.Update()) handles Y position and Pitch/Roll.
-
             if (!IsMoving || !_movementTargetPosition.HasValue)
             {
                 if (CurrentSpeed > 0)
@@ -88,28 +84,29 @@ namespace Core.Model
                     CurrentSpeed = Math.Max(0, CurrentSpeed - (MaxSpeed * 2f * deltaTime)); 
                 }
                 else { CurrentSpeed = 0f; }
-                if (CurrentSpeed == 0f) IsMoving = false; 
+                if (CurrentSpeed == 0f) IsMoving = false; // Ensure IsMoving is false if speed is zero
                 return;
             }
 
-            Vector2 currentPos2D = new Vector2(Position.X, Position.Z);
+            Vector2 currentPos2D = new Vector2(Position.X, Position.Z); // Position.Y is already ocean-adjusted
             Vector2 targetPos2D = _movementTargetPosition.Value;
             Vector2 toTarget = targetPos2D - currentPos2D;
 
             float distanceToTargetSq = toTarget.SqrMagnitude;
             
             float dynamicStoppingDistance = CurrentSpeed * deltaTime * 0.75f; 
-            dynamicStoppingDistance = Math.Max(MaxSpeed * deltaTime * 0.25f, dynamicStoppingDistance);
+            dynamicStoppingDistance = Math.Max(MaxSpeed * deltaTime * 0.25f, dynamicStoppingDistance); // Min stopping distance related to max speed
             float stoppingDistanceSq = dynamicStoppingDistance * dynamicStoppingDistance;
-            stoppingDistanceSq = Math.Max(0.01f * 0.01f, stoppingDistanceSq); 
+            stoppingDistanceSq = Math.Max(0.01f * 0.01f, stoppingDistanceSq); // Ensure a very small minimum stopping distance squared
 
             if (distanceToTargetSq < stoppingDistanceSq)
             {
-                IsMoving = false; 
-                // Don't snap XZ position here. Let deceleration and ocean behavior finalize.
+                IsMoving = false; // Reached target or close enough to stop active movement
+                // CurrentSpeed will naturally decrease in the next frame if IsMoving is false.
                 return;
             }
 
+            // Acceleration
             if (CurrentSpeed < MaxSpeed)
             {
                 CurrentSpeed = Math.Min(MaxSpeed, CurrentSpeed + (MaxSpeed * 1.0f * deltaTime)); 
@@ -118,35 +115,83 @@ namespace Core.Model
             }
             
             // --- Yaw Rotation ---
-            // The ship's commanded yaw. FloatingBehavior handles the ocean-induced pitch/roll.
-            // We extract the current planar forward from the full Rotation.
-            Vector3 currentWorldForward = Rotation * Vector3.Forward; // Current orientation including ocean effects
-            Vector3 planarForward = new Vector3(currentWorldForward.X, 0, currentWorldForward.Z).NormalizedSafe(Vector3.Forward);
-            Quaternion currentPlanarRotation = Quaternion.LookRotation(planarForward, Vector3.Up);
+            // currentFullRotationFromOcean already includes pitch/roll from the ocean.
+            // We extract its current planar forward direction to determine current heading for yaw calculations.
+            Vector3 currentWorldForwardFromOcean = currentFullRotationFromOcean * Vector3.Forward;
+            Vector3 planarForwardFromOcean = new Vector3(currentWorldForwardFromOcean.X, 0, currentWorldForwardFromOcean.Z).NormalizedSafe(Vector3.Forward);
+            Quaternion currentPlanarYawComponent = Quaternion.LookRotation(planarForwardFromOcean, Vector3.Up);
 
+            // Determine desired planar forward based on movement target
             Vector2 directionToTargetPlanar = toTarget.Normalized;
-            Vector3 targetForwardPlanar = new Vector3(directionToTargetPlanar.X, 0, directionToTargetPlanar.Y);
+            // Vector2 is (X,Y), map Y to Z for Vector3 world space
+            Vector3 targetForwardPlanar = new Vector3(directionToTargetPlanar.X, 0, directionToTargetPlanar.Y); 
             
-            Quaternion newPlanarRotation = currentPlanarRotation; // Default to current if target is directly behind or too close
-            if (targetForwardPlanar.SqrMagnitude > Vector3.Epsilon) // Ensure targetForward is not zero
+            Quaternion desiredPureYawRotation = currentPlanarYawComponent; // Default to current if target is invalid (e.g. zero vector)
+            if (targetForwardPlanar.SqrMagnitude > Vector3.Epsilon) 
             {
-                Quaternion desiredPlanarRotation = Quaternion.LookRotation(targetForwardPlanar, Vector3.Up);
-                newPlanarRotation = Quaternion.RotateTowards(currentPlanarRotation, desiredPlanarRotation, TurnRate * deltaTime);
+                desiredPureYawRotation = Quaternion.LookRotation(targetForwardPlanar, Vector3.Up);
             }
 
-            // We set the Rotation to this newPlanarRotation.
-            // The FloatingBehavior (which ran *before* this UpdateMovement in the same frame via base.Update())
-            // has already applied pitch/roll based on the *previous* frame's Rotation.
-            // Now, we update Rotation with the new commanded yaw. The *next* frame's FloatingBehavior
-            // will use this updated Rotation (new yaw, but potentially "flattened" pitch/roll from this assignment)
-            // as its basis for calculating new pitch/roll.
-            Rotation = newPlanarRotation;
+            // Interpolate the pure yaw component
+            Quaternion newPureYawComponent = Quaternion.RotateTowards(currentPlanarYawComponent, desiredPureYawRotation, TurnRate * deltaTime);
+
+            // Calculate the change in yaw and apply it to the ocean-influenced rotation
+            Quaternion yawChange = newPureYawComponent * currentPlanarYawComponent.Inverse;
+            this.Rotation = (yawChange * currentFullRotationFromOcean).Normalized; // Apply yaw change and normalize
             
             // --- Update Position (Planar) ---
-            // Velocity is based on the (now yaw-updated) Rotation.
-            Vector3 planarVelocityDelta = Rotation * Vector3.Forward * CurrentSpeed * deltaTime;
-            Position = new Vector3(Position.X + planarVelocityDelta.X, Position.Y, Position.Z + planarVelocityDelta.Z);
+            // Velocity is based on the commanded yaw (newPureYawComponent) to ensure XZ movement is planar.
+            // Position.Y is already set by FloatingBehavior. We only modify X and Z.
+            Vector3 planarVelocityDelta = newPureYawComponent * Vector3.Forward * CurrentSpeed * deltaTime;
+            this.Position = new Vector3(Position.X + planarVelocityDelta.X, Position.Y, Position.Z + planarVelocityDelta.Z);
         }
+
+        protected virtual void UpdateCollectablesInteraction(float deltaTime)
+        {
+            if (IsDead) return;
+
+            // If already targeting a collectable, check if it's still valid or collected
+            if (_targetedCollectable != null)
+            {
+                if (_targetedCollectable.IsDead || _targetedCollectable.CollectingShip != this)
+                {
+                    // It was collected by us (and isDead now), or someone else claimed it, or it died.
+                    _targetedCollectable = null;
+                }
+                else
+                {
+                    return; // Still actively attracting this one, don't look for others.
+                }
+            }
+
+            // Scan for new collectables if not currently attracting one
+            CollectableFloatingEntity closestUnclaimedCollectable = null;
+            float closestDistSq = CollectableDetectionRange * CollectableDetectionRange;
+
+            foreach (var entity in _level.GetAllEntities().OfType<CollectableFloatingEntity>())
+            {
+                if (entity.IsDead || entity.CollectingShip != null) // Skip dead or already claimed
+                {
+                    continue;
+                }
+
+                float distSq = (entity.Position - this.Position).SqrMagnitude;
+                if (distSq <= closestDistSq)
+                {
+                    closestDistSq = distSq;
+                    closestUnclaimedCollectable = entity;
+                }
+            }
+
+            if (closestUnclaimedCollectable != null)
+            {
+                if (closestUnclaimedCollectable.TryClaimBy(this))
+                {
+                    _targetedCollectable = closestUnclaimedCollectable;
+                }
+            }
+        }
+
 
         protected override void Death()
         {
@@ -168,6 +213,13 @@ namespace Core.Model
             base.ObligatoryOnRemove();
             OnMovementTargetProgrammed = null; 
             
+            // If ship is removed for reasons other than death (e.g. disband), ensure collectable is unclaimed
+            if (_targetedCollectable != null && _targetedCollectable.CollectingShip == this && !_targetedCollectable.IsDead)
+            {
+                _targetedCollectable.Unclaim();
+            }
+            _targetedCollectable = null;
+
             var cannonsToKill = new List<DefaultCannon>(_cannons);
             foreach (var cannon in cannonsToKill)
             {

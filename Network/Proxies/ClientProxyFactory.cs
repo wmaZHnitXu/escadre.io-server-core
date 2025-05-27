@@ -23,9 +23,14 @@ namespace Core.Network.Proxies
                 case Entity.EntityTypeEnum.DefaultShip:
                     proxy = new ShipProxy.ClientProxy(entityId, entityType, clientLevel);
                     break;
-                case Entity.EntityTypeEnum.Escadre: // Added case for Escadre
+                case Entity.EntityTypeEnum.Escadre: 
                     proxy = new EscadreProxy.ClientProxy(entityId, clientLevel);
                     break;
+                case Entity.EntityTypeEnum.ResourceBox: // Added
+                    proxy = new CollectableFloatingEntityProxy.ClientProxy(entityId, entityType, clientLevel);
+                    break;
+                // DefaultCannon is an AttachedEntity, client-side representation would be part of the Ship's presentation.
+                // It typically doesn't have its own standalone proxy unless it's a fully independent entity.
                 default:
                     Logger.LogError($"[ClientProxyFactory] No ClientProxy registered for EntityType: {entityType}. Entity ID: {entityId}. Cannot create proxy.");
                     throw new ArgumentException($"No ClientProxy registered for EntityType: {entityType}");
