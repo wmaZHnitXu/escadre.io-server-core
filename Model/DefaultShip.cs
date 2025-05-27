@@ -26,8 +26,8 @@ namespace Core.Model
             // Assuming ship length is ~2 units (Z), width ~1 unit (X)
             var floatingPoints = new List<Vector3>
             {
-                new Vector3(0f, 0f, 1.0f),   // Bow
-                new Vector3(0f, 0f, -1.0f),  // Stern
+                new Vector3(0f, 0f, 2.0f),   // Bow
+                new Vector3(0f, 0f, -2.0f),  // Stern
                 new Vector3(0.5f, 0f, 0f),   // Starboard mid
                 new Vector3(-0.5f, 0f, 0f)   // Port mid
             };
