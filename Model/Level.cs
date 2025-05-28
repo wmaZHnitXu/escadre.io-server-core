@@ -3,9 +3,10 @@ using System.Collections.Generic;
 using Core.Logging;
 using Core.Model;
 using System.Linq;
-using System; // Required for .Any() and .OfType<T>()
+using System; 
 using Core.Ocean; 
 using Core.Primitives; 
+using Core.Visibility; // For IVisibilityStrategy
 
 namespace Core.Model
 {
@@ -28,11 +29,10 @@ namespace Core.Model
         public float CurrentTime => _currentTime;
 
         public IOceanDataProvider OceanDataProvider { get; private set; }
-        // OceanSettings is now part of IOceanDataProvider.Settings
-        // public OceanSettings OceanSettings { get; private set; }
+        private readonly IVisibilityStrategy _spatialIndex; // Changed from IVisibilityStrategy to a more direct name
 
 
-        public Level(IOceanDataProvider oceanDataProvider = null) // OceanSettings removed from constructor
+        public Level(IOceanDataProvider oceanDataProvider = null, IVisibilityStrategy spatialIndex = null) 
         {
             _entities = new List<Entity>();
             
@@ -43,8 +43,14 @@ namespace Core.Model
             }
             else
             {
-                OceanSettings settings = OceanDataProvider.Settings; // Get settings from provider
+                OceanSettings settings = OceanDataProvider.Settings; 
                 Logger.Log($"[Level] Ocean Initialized. TileSize: {settings.TextureTileWorldSize}, LoopDur: {settings.TextureTimeLoopDuration}, Scale: {settings.DisplacementScale}");
+            }
+            
+            _spatialIndex = spatialIndex;
+            if (_spatialIndex == null)
+            {
+                Logger.LogWarning("[Level] No IVisibilityStrategy (SpatialIndex) provided. Spatial queries will not be optimized.");
             }
 
             InitializeShop(); 
@@ -68,8 +74,15 @@ namespace Core.Model
             var entitiesToUpdate = _entities.ToList(); 
             foreach (Entity entity in entitiesToUpdate)
             {
-                if (!_entities.Contains(entity) || entity.IsDead) continue; 
+                if (!_entities.Contains(entity) || entity.IsDead) continue;
+                Vector3 oldPosition = entity.Position; // Store position before update
                 entity.Update(delta);
+                // After entity.Update(), its position might have changed.
+                // If spatial index is present, notify it about the potential move.
+                if (_spatialIndex != null && entity.Position != oldPosition) // Only update if position actually changed
+                {
+                    _spatialIndex.AddOrUpdateEntity(entity);
+                }
             }
 
             RemoveRemovedEntities();
@@ -96,6 +109,7 @@ namespace Core.Model
             }
             RemoveRemovedEntities(); 
             _toAdd.Clear();
+            _spatialIndex?.Clear();
         }
 
         public IEnumerable<Entity> GetAllEntities() {
@@ -108,6 +122,8 @@ namespace Core.Model
         }
 
         public bool TryGetEntity(int entityId, out Entity result) {
+            // This linear search is acceptable as _entities is the master list.
+            // Spatial index is for proximity queries, not direct ID lookups.
             for (int i = 0; i < _entities.Count; i++) {
                 if (_entities[i].Id == entityId) {
                     result = _entities[i];
@@ -147,6 +163,7 @@ namespace Core.Model
                     continue;
                 }
                 _entities.Add(entity);
+                _spatialIndex?.AddOrUpdateEntity(entity); // Add to spatial index
                 entity.OnDeathEvent += HandleEntityDeathForLevelCleanup; 
                 OnEntityAddedEvent?.Invoke(entity); 
             }
@@ -155,7 +172,7 @@ namespace Core.Model
         
         private void HandleEntityDeathForLevelCleanup(Entity entity)
         {
-            RemoveEntity(entity);
+            RemoveEntity(entity); // This will queue it for removal
         }
 
 
@@ -166,6 +183,7 @@ namespace Core.Model
             foreach (Entity entity in _toRemove)
             {
                 entity.OnDeathEvent -= HandleEntityDeathForLevelCleanup; 
+                _spatialIndex?.RemoveEntity(entity); // Remove from spatial index
                 bool removed = _entities.Remove(entity); 
                 if (removed) 
                 {
@@ -185,6 +203,62 @@ namespace Core.Model
             else
             {
                 return _idsFreed.Dequeue();
+            }
+        }
+
+        // --- Spatial Query Methods using IVisibilityStrategy ---
+        public IEnumerable<Entity> GetEntitiesInRect(RectFloat areaBounds, Predicate<Entity> filter = null)
+        {
+            if (_spatialIndex == null)
+            {
+                // Fallback: linear scan if no spatial index
+                Logger.LogWarning("[Level] GetEntitiesInRect: Spatial index not available, performing linear scan.");
+                foreach (var entity in _entities)
+                {
+                    if (!entity.IsDead && entity.GetBounds2D().Intersects(areaBounds) && (filter == null || filter(entity)))
+                    {
+                        yield return entity;
+                    }
+                }
+                yield break;
+            }
+
+            var entityIds = _spatialIndex.QueryRect(areaBounds);
+            foreach (var id in entityIds)
+            {
+                if (TryGetEntity(id, out Entity entity) && !entity.IsDead && (filter == null || filter(entity)))
+                {
+                    yield return entity;
+                }
+            }
+        }
+
+        public IEnumerable<Entity> GetEntitiesInRadius(Vector2 center, float radius, Predicate<Entity> filter = null)
+        {
+            if (_spatialIndex == null)
+            {
+                // Fallback: linear scan
+                Logger.LogWarning("[Level] GetEntitiesInRadius: Spatial index not available, performing linear scan.");
+                float radiusSq = radius * radius;
+                foreach (var entity in _entities)
+                {
+                    if (!entity.IsDead && 
+                        (new Vector2(entity.Position.X, entity.Position.Z) - center).SqrMagnitude <= radiusSq &&
+                        (filter == null || filter(entity)))
+                    {
+                        yield return entity;
+                    }
+                }
+                yield break;
+            }
+
+            var entityIds = _spatialIndex.QueryRadius(center, radius);
+            foreach (var id in entityIds)
+            {
+                if (TryGetEntity(id, out Entity entity) && !entity.IsDead && (filter == null || filter(entity)))
+                {
+                    yield return entity;
+                }
             }
         }
     }

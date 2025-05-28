@@ -20,7 +20,7 @@ namespace Core
         public Level ServerLevel { get; }
         public VisibilityManager VisibilityManager { get; }
         private readonly ServerReplicationManager _replicationManager;
-        private readonly IVisibilityStrategy _visibilityStrategy;
+        private readonly IVisibilityStrategy _visibilityStrategy; // This is now also the spatial index
         private readonly IClock _serverClock; 
         private readonly IServerNetworkLayer _networkLayer; 
         private readonly IClientConnectionValidator _connectionValidator; 
@@ -38,25 +38,28 @@ namespace Core
         public event Action<ClientConnection> ClientUnregisteredEvent;
 
         public CoreComposer(IServerNetworkLayer networkLayer, 
-                            IVisibilityStrategy visibilityStrategy, 
+                            IVisibilityStrategy visibilityStrategyAndSpatialIndex, // Renamed parameter for clarity
                             IClock serverClock,
                             IClientConnectionValidator connectionValidator,
                             IOceanDataProvider serverOceanDataProvider) 
         {
             _networkLayer = networkLayer ?? throw new ArgumentNullException(nameof(networkLayer));
-            _visibilityStrategy = visibilityStrategy ?? throw new ArgumentNullException(nameof(visibilityStrategy));
+            _visibilityStrategy = visibilityStrategyAndSpatialIndex ?? throw new ArgumentNullException(nameof(visibilityStrategyAndSpatialIndex));
             _serverClock = serverClock ?? throw new ArgumentNullException(nameof(serverClock)); 
             _connectionValidator = connectionValidator ?? throw new ArgumentNullException(nameof(connectionValidator));
-            _serverOceanDataProvider = serverOceanDataProvider; // Can be null if ocean is disabled server-side
+            _serverOceanDataProvider = serverOceanDataProvider; 
 
             Logger.Log("[CoreComposer] Initializing Core Systems...");
 
-            ServerLevel = new Level(_serverOceanDataProvider); 
+            // Pass the spatial index (_visibilityStrategy) to ServerLevel
+            ServerLevel = new Level(_serverOceanDataProvider, _visibilityStrategy); 
             VisibilityManager = new VisibilityManager(_visibilityStrategy);
             _replicationManager = new ServerReplicationManager(ServerLevel, _networkLayer, VisibilityManager, _clientConnections, _serverClock); 
             
             _networkLayer.OnClientMessageReceived += HandleNetworkMessage_SessionManagement;
             ServerLevel.OnEntityRemovedEvent += HandleEntityRemoved; 
+            // ServerLevel.OnEntityAddedEvent used by ReplicationManager for proxy creation
+            // and by Level itself to add to _spatialIndex.
 
             Logger.Log("[CoreComposer] Initialization Complete. Listening for client connections.");
         }
@@ -64,6 +67,11 @@ namespace Core
         private void HandleEntityRemoved(Entity entity)
         {
             if (_isDisposed) return;
+
+            // When an entity is removed from the level, VisibilityManager needs to unregister it
+            // The spatial index (_visibilityStrategy) is also notified by Level itself.
+            VisibilityManager.UnregisterEntity(entity.Id);
+
 
             if (entity is Escadre destroyedEscadre)
             {
@@ -106,7 +114,6 @@ namespace Core
                     if (_clientConnections.ContainsKey(validatedIdentity.ClientId))
                     {
                         Logger.LogWarning($"[CoreComposer] Client ID {validatedIdentity.ClientId} (from token) is already connected. Rejecting new connection from source {sourceNetworkId}.");
-                        // Optionally, send a rejection message back. For now, just log and return.
                         return;
                     }
                     if (_sourceNetworkIdToGameClientIdMap.ContainsKey(sourceNetworkId))
@@ -124,7 +131,7 @@ namespace Core
 
                     float x = (validatedIdentity.ClientId % 7) * 25f - 75f; 
                     float z = ((validatedIdentity.ClientId / 7) % 7) * 25f - 75f;
-                    Vector3 spawnPosition = new Vector3(x, 0, z); // Initial Y will be adjusted by ocean if active
+                    Vector3 spawnPosition = new Vector3(x, 0, z); 
                     
                     CreateClientSessionAndEscadreEntity(validatedIdentity, pvsRadius, spawnPosition, sourceNetworkId);
                 }
@@ -168,19 +175,20 @@ namespace Core
             var clientConnection = new ClientConnection(identity.ClientId, ServerLevel, initialPvsRadius); 
             _clientConnections.Add(identity.ClientId, clientConnection); 
             VisibilityManager.AddOrUpdateClientView(clientConnection); 
+            _visibilityStrategy.AddOrUpdateClientView(clientConnection); // Also notify strategy if it tracks clients
 
             Escadre escadreEntity = new Escadre(ServerLevel, identity.ClientId, identity.Nickname, initialSpawnPosition);
             clientConnection.AssignEscadre(escadreEntity); 
             
             Ship initialShip = new DefaultShip(ServerLevel, escadreEntity, initialSpawnPosition); 
             escadreEntity.AddShip(initialShip);
+            // Ship positions will be set by formation logic, Escadre.Position will be the anchor.
+            // Initial ship spawn could be at Escadre.Position, then formation logic moves it.
             escadreEntity.UpdateShipMovementTargets(_serverClock.CurrentTime);
 
             Logger.Log($"[CoreComposer] Client Session Created & Registered: ID={identity.ClientId}, Nick='{identity.Nickname}'. Mapped to NetworkSourceID: {sourceNetworkId}. Escadre Entity ID: {escadreEntity.Id}");
 
-            // Notify SRM to send initial data like OceanSettings
             _replicationManager.OnClientSessionEstablished(identity.ClientId);
-
             ClientRegisteredEvent?.Invoke(clientConnection); 
             
             return clientConnection;
@@ -209,8 +217,8 @@ namespace Core
                 }
                 else { Logger.LogWarning($"[CoreComposer] No sourceNetworkId mapping found for Game Client ID {gameClientId} during unregistration."); }
 
-
                 VisibilityManager.RemoveClientView(gameClientId); 
+                _visibilityStrategy.RemoveClientView(clientConnection); // Also notify strategy
                 
                 if (clientConnection.EscadreEntity != null)
                 {
@@ -228,25 +236,35 @@ namespace Core
             if (_isDisposed) return;
             try
             {
-                ServerLevel.DoUpdate(deltaTime); 
-                foreach (var entity in ServerLevel.GetAllEntities()) 
+                // ServerLevel.DoUpdate calls entity.Update(), which changes positions.
+                // It also calls _spatialIndex.AddOrUpdateEntity for entities that moved.
+                ServerLevel.DoUpdate(deltaTime);
+
+                // Entities are added to spatial index via Level.AddAddedEntities()
+                // and updated via Level.DoUpdate() if they move.
+                // VisibilityManager.RegisterEntity is used to inform VM about an entity's existence
+                // and for VM to pass it to its strategy.
+                // Since Level now also uses the strategy, VM.RegisterEntity still relevant for VM's internal lists.
+                
+                foreach (var entity in ServerLevel.GetAllEntities())
                 {
-                    if (!entity.IsDead) 
+                    if (!entity.IsDead)
                     {
-                        VisibilityManager.RegisterEntity(entity); 
+                        VisibilityManager.RegisterEntity(entity);
+                        // _visibilityStrategy.AddOrUpdateEntity(entity); // This is now handled by Level or implicitly by VM.RegisterEntity
                     }
                 }
+                
+                
                 foreach (var clientConn in _clientConnections.Values.ToList()) 
                 {
                     if (clientConn.CurrentState != ClientState.Destroyed && clientConn.EscadreEntity != null && !clientConn.EscadreEntity.IsDead) 
                     {
                         VisibilityManager.AddOrUpdateClientView(clientConn);
-                    }
-                    else if (clientConn.CurrentState != ClientState.Destroyed && (clientConn.EscadreEntity == null || clientConn.EscadreEntity.IsDead))
-                    {
-                        // Handle spectator or other states if PVS should remain active
+                        _visibilityStrategy.AddOrUpdateClientView(clientConn); // Ensure strategy also knows about client views
                     }
                 }
+                
                 VisibilityManager.UpdateAllClientVisibility();
             }
             catch (Exception ex) { Logger.LogError($"[CoreComposer] Error during Update loop: {ex.Message}\nStackTrace: {ex.StackTrace}"); }
@@ -275,9 +293,13 @@ namespace Core
 
             _replicationManager?.Dispose(); 
             VisibilityManager?.Dispose(); 
-            ServerLevel?.Destroy(); 
-            (_visibilityStrategy as IDisposable)?.Dispose();
-            (_serverOceanDataProvider as IDisposable)?.Dispose();
+            ServerLevel?.Destroy(); // This will also call _spatialIndex.Clear()
+            
+            // _visibilityStrategy is disposed by VisibilityManager if it also owned it,
+            // or here if CoreComposer directly owns it.
+            // Since VisibilityManager uses it, it should dispose it. Let's assume VM.Dispose handles strategy.Dispose.
+            // If not, uncomment:
+            // (_visibilityStrategy as IDisposable)?.Dispose(); 
 
             ClientRegisteredEvent = null;
             ClientUnregisteredEvent = null;

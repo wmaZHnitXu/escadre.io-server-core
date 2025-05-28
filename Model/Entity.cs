@@ -41,6 +41,13 @@ namespace Core.Model
         public event Action<Entity> OnDestructionEvent;
         public event Action<Entity, Vector3, Quaternion> OnTeleported;
 
+        /// <summary>
+        /// Defines the 2D radius for this entity, used for coarse bounding box generation for the QuadTree.
+        /// Override in derived classes for more specific sizes.
+        /// </summary>
+        public virtual float BoundingRadius2D { get; protected set; } = 1.0f;
+
+
         public Entity(Level level)
         {
             _level = level ?? throw new ArgumentNullException(nameof(level));
@@ -61,7 +68,7 @@ namespace Core.Model
                 FloatingBehavior.ApplyFloating(
                     this.Position, 
                     this.Rotation, 
-                    _level.CurrentTime, // Pass current time from level
+                    _level.CurrentTime, 
                     delta, 
                     out Vector3 newPos, 
                     out Quaternion newRot
@@ -80,11 +87,11 @@ namespace Core.Model
             {
                 Death();
                 OnDestructionEvent?.Invoke(this);
-                OnDestructionEvent = null;
+                // OnDestructionEvent = null; // Keep for multiple subscribers if needed, but typically proxies handle it once.
             }
 
             OnDeathEvent?.Invoke(this);
-            OnDeathEvent = null;
+            // OnDeathEvent = null; // Same as above.
             ObligatoryOnRemove();
         }
 
@@ -100,9 +107,23 @@ namespace Core.Model
             OnTeleported?.Invoke(this, _position, _rotation);
         }
 
+        /// <summary>
+        /// Gets the 2D bounding box for this entity, primarily for QuadTree insertion.
+        /// Uses Position (X,Z) and BoundingRadius2D.
+        /// </summary>
+        public virtual RectFloat GetBounds2D()
+        {
+            return RectFloat.FromCenterRadius(new Vector2(Position.X, Position.Z), BoundingRadius2D);
+        }
+
+
         protected virtual void ObligatoryOnRemove()
         {
             FloatingBehavior = null; 
+            // Nullify events to prevent issues if an entity reference is held elsewhere post-removal
+            OnDeathEvent = null;
+            OnDestructionEvent = null;
+            OnTeleported = null;
         }
 
         protected virtual void Death()

@@ -13,11 +13,11 @@ namespace Core.Model
         public int OwningEscadreClientId { get; } 
         public Escadre OwningEscadre { get; } 
 
-        public float CurrentSpeed { get; protected set; } // Planar speed
+        public float CurrentSpeed { get; protected set; } 
         public bool IsMoving { get; protected set; }
 
         public abstract float MaxSpeed { get; protected set; }
-        public abstract float TurnRate { get; protected set; } // Yaw rate
+        public abstract float TurnRate { get; protected set; } 
         
         private Vector2? _movementTargetPosition; 
         public event Action<Ship, Vector2?, float> OnMovementTargetProgrammed; 
@@ -41,8 +41,7 @@ namespace Core.Model
 
         public override void Update(float delta)
         {
-            base.Update(delta); // This calls Entity.Update -> FloatingBehavior.ApplyFloating
-                                // this.Position and this.Rotation are now updated by FloatingBehavior
+            base.Update(delta); // Handles FloatingBehavior
 
             if (IsDead)
             {
@@ -54,7 +53,6 @@ namespace Core.Model
                 return;
             }
 
-            // Pass the current, ocean-affected rotation to UpdateMovement
             UpdateMovement(delta, this.Rotation); 
             UpdateCollectablesInteraction(delta);
         }
@@ -65,8 +63,7 @@ namespace Core.Model
                            (targetWorldPosition.HasValue && _movementTargetPosition.Value != targetWorldPosition.Value);
 
             _movementTargetPosition = targetWorldPosition;
-
-            IsMoving = targetWorldPosition.HasValue; // Set IsMoving based on whether a target exists
+            IsMoving = targetWorldPosition.HasValue; 
 
             if (changed || targetWorldPosition.HasValue)
             {
@@ -74,7 +71,6 @@ namespace Core.Model
             }
         }
 
-        // Method signature changed to accept currentFullRotationFromOcean
         protected virtual void UpdateMovement(float deltaTime, Quaternion currentFullRotationFromOcean)
         {
             if (!IsMoving || !_movementTargetPosition.HasValue)
@@ -84,29 +80,27 @@ namespace Core.Model
                     CurrentSpeed = Math.Max(0, CurrentSpeed - (MaxSpeed * 2f * deltaTime)); 
                 }
                 else { CurrentSpeed = 0f; }
-                if (CurrentSpeed == 0f) IsMoving = false; // Ensure IsMoving is false if speed is zero
+                if (CurrentSpeed == 0f) IsMoving = false; 
                 return;
             }
 
-            Vector2 currentPos2D = new Vector2(Position.X, Position.Z); // Position.Y is already ocean-adjusted
+            Vector2 currentPos2D = new Vector2(Position.X, Position.Z); 
             Vector2 targetPos2D = _movementTargetPosition.Value;
             Vector2 toTarget = targetPos2D - currentPos2D;
 
             float distanceToTargetSq = toTarget.SqrMagnitude;
             
             float dynamicStoppingDistance = CurrentSpeed * deltaTime * 0.75f; 
-            dynamicStoppingDistance = Math.Max(MaxSpeed * deltaTime * 0.25f, dynamicStoppingDistance); // Min stopping distance related to max speed
+            dynamicStoppingDistance = Math.Max(MaxSpeed * deltaTime * 0.25f, dynamicStoppingDistance); 
             float stoppingDistanceSq = dynamicStoppingDistance * dynamicStoppingDistance;
-            stoppingDistanceSq = Math.Max(0.01f * 0.01f, stoppingDistanceSq); // Ensure a very small minimum stopping distance squared
+            stoppingDistanceSq = Math.Max(0.01f * 0.01f, stoppingDistanceSq); 
 
             if (distanceToTargetSq < stoppingDistanceSq)
             {
-                IsMoving = false; // Reached target or close enough to stop active movement
-                // CurrentSpeed will naturally decrease in the next frame if IsMoving is false.
+                IsMoving = false; 
                 return;
             }
 
-            // Acceleration
             if (CurrentSpeed < MaxSpeed)
             {
                 CurrentSpeed = Math.Min(MaxSpeed, CurrentSpeed + (MaxSpeed * 1.0f * deltaTime)); 
@@ -114,34 +108,23 @@ namespace Core.Model
                  CurrentSpeed = MaxSpeed;
             }
             
-            // --- Yaw Rotation ---
-            // currentFullRotationFromOcean already includes pitch/roll from the ocean.
-            // We extract its current planar forward direction to determine current heading for yaw calculations.
             Vector3 currentWorldForwardFromOcean = currentFullRotationFromOcean * Vector3.Forward;
             Vector3 planarForwardFromOcean = new Vector3(currentWorldForwardFromOcean.X, 0, currentWorldForwardFromOcean.Z).NormalizedSafe(Vector3.Forward);
             Quaternion currentPlanarYawComponent = Quaternion.LookRotation(planarForwardFromOcean, Vector3.Up);
 
-            // Determine desired planar forward based on movement target
             Vector2 directionToTargetPlanar = toTarget.Normalized;
-            // Vector2 is (X,Y), map Y to Z for Vector3 world space
             Vector3 targetForwardPlanar = new Vector3(directionToTargetPlanar.X, 0, directionToTargetPlanar.Y); 
             
-            Quaternion desiredPureYawRotation = currentPlanarYawComponent; // Default to current if target is invalid (e.g. zero vector)
+            Quaternion desiredPureYawRotation = currentPlanarYawComponent; 
             if (targetForwardPlanar.SqrMagnitude > Vector3.Epsilon) 
             {
                 desiredPureYawRotation = Quaternion.LookRotation(targetForwardPlanar, Vector3.Up);
             }
 
-            // Interpolate the pure yaw component
             Quaternion newPureYawComponent = Quaternion.RotateTowards(currentPlanarYawComponent, desiredPureYawRotation, TurnRate * deltaTime);
-
-            // Calculate the change in yaw and apply it to the ocean-influenced rotation
             Quaternion yawChange = newPureYawComponent * currentPlanarYawComponent.Inverse;
-            this.Rotation = (yawChange * currentFullRotationFromOcean).Normalized; // Apply yaw change and normalize
+            this.Rotation = (yawChange * currentFullRotationFromOcean).Normalized; 
             
-            // --- Update Position (Planar) ---
-            // Velocity is based on the commanded yaw (newPureYawComponent) to ensure XZ movement is planar.
-            // Position.Y is already set by FloatingBehavior. We only modify X and Z.
             Vector3 planarVelocityDelta = newPureYawComponent * Vector3.Forward * CurrentSpeed * deltaTime;
             this.Position = new Vector3(Position.X + planarVelocityDelta.X, Position.Y, Position.Z + planarVelocityDelta.Z);
         }
@@ -150,36 +133,41 @@ namespace Core.Model
         {
             if (IsDead) return;
 
-            // If already targeting a collectable, check if it's still valid or collected
             if (_targetedCollectable != null)
             {
                 if (_targetedCollectable.IsDead || _targetedCollectable.CollectingShip != this)
                 {
-                    // It was collected by us (and isDead now), or someone else claimed it, or it died.
                     _targetedCollectable = null;
                 }
                 else
                 {
-                    return; // Still actively attracting this one, don't look for others.
+                    return; 
                 }
             }
 
-            // Scan for new collectables if not currently attracting one
             CollectableFloatingEntity closestUnclaimedCollectable = null;
             float closestDistSq = CollectableDetectionRange * CollectableDetectionRange;
 
-            foreach (var entity in _level.GetAllEntities().OfType<CollectableFloatingEntity>())
-            {
-                if (entity.IsDead || entity.CollectingShip != null) // Skip dead or already claimed
-                {
-                    continue;
-                }
+            // Use spatial query from Level
+            var nearbyCollectables = _level.GetEntitiesInRadius(
+                new Vector2(this.Position.X, this.Position.Z),
+                this.CollectableDetectionRange,
+                entity => entity is CollectableFloatingEntity cfe && !cfe.IsDead && cfe.CollectingShip == null
+            ).OfType<CollectableFloatingEntity>();
 
-                float distSq = (entity.Position - this.Position).SqrMagnitude;
-                if (distSq <= closestDistSq)
+
+            foreach (var collectable in nearbyCollectables)
+            {
+                // Redundant checks if filter is perfect, but good for safety
+                if (collectable.IsDead || collectable.CollectingShip != null) continue;
+
+                float distSq = (collectable.Position - this.Position).SqrMagnitude;
+                // QueryRadius should ensure they are within CollectableDetectionRange,
+                // but this precise distSq is still useful for finding the *closest*.
+                if (distSq <= closestDistSq) // Check against current closest, not just detection range
                 {
                     closestDistSq = distSq;
-                    closestUnclaimedCollectable = entity;
+                    closestUnclaimedCollectable = collectable;
                 }
             }
 
@@ -213,7 +201,6 @@ namespace Core.Model
             base.ObligatoryOnRemove();
             OnMovementTargetProgrammed = null; 
             
-            // If ship is removed for reasons other than death (e.g. disband), ensure collectable is unclaimed
             if (_targetedCollectable != null && _targetedCollectable.CollectingShip == this && !_targetedCollectable.IsDead)
             {
                 _targetedCollectable.Unclaim();

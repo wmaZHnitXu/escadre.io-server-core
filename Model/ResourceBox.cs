@@ -10,8 +10,7 @@ namespace Core.Model
         public override EntityTypeEnum EntityType => EntityTypeEnum.ResourceBox;
 
         public int ResourceAmount { get; private set; }
-
-        // Note: FinalCollectionDistance and SuckSpeed are inherited and set in base constructor
+        public override float BoundingRadius2D { get; protected set; } = 0.5f; // Smaller bounding radius
 
         public ResourceBox(
             Level level, 
@@ -21,11 +20,10 @@ namespace Core.Model
             float suckSpeed = 4.0f)
             : base(level, initialPosition, finalCollectionDistance, suckSpeed)
         {
-            ResourceAmount = resourceAmount > 0 ? resourceAmount : 10; // Ensure positive amount
+            ResourceAmount = resourceAmount > 0 ? resourceAmount : 10; 
 
-            // Initialize floating behavior
             if (level.OceanDataProvider != null)
-            {
+            {   /*
                 this.FloatingBehavior = new DefaultFloatingBehavior(
                     oceanDataProvider: level.OceanDataProvider,
                     buoyancyFactor: 1.0f,
@@ -35,13 +33,12 @@ namespace Core.Model
                     verticalInterpolationSpeed: 1.5f,
                     rotationalInterpolationSpeed: 20.0f
                 );
+                */
             }
             else
             {
                 Logger.LogWarning($"[ResourceBox ID:{this.Id}] OceanDataProvider not available. FloatingBehavior not initialized.");
             }
-
-            // Logger.Log($"[ResourceBox ID pending:{this.Id}] Created. Amount: {ResourceAmount}, CollectionDist: {FinalCollectionDistance}, SuckSpeed: {SuckSpeed}");
         }
 
         protected override void ApplyPickupEffect(Ship collectingShip)
