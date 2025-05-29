@@ -4,23 +4,33 @@ using System.Collections.Generic;
 using System.Linq;
 using Core.Model;
 using Core.Logging;
+using Core.Time; 
+using Core.Primitives; 
 
 namespace Core.Visibility
 {
     public class VisibilityManager : IDisposable
     {
         private readonly IVisibilityStrategy _strategy;
+        private readonly IClock _clock; 
         private readonly Dictionary<int, Entity> _registeredEntities = new();
         private readonly Dictionary<int, IClientView> _registeredClients = new();
         private readonly Dictionary<int, HashSet<int>> _clientVisibleSets = new();
+        
+        private const float StationaryClientPvsUpdateInterval = 0.5f; 
+        private const float ClientMovementPvsUpdateThresholdSq = 1.0f * 1.0f; 
+        private readonly Dictionary<int, float> _clientLastPvsUpdateTime = new();
+        private readonly Dictionary<int, Vector3> _clientLastPvsUpdatePosition = new();
+
         private bool _isDisposed = false;
 
         public event Action<int, int> EntityEnteredPvs;
         public event Action<int, int> EntityLeftPvs;
 
-        public VisibilityManager(IVisibilityStrategy strategy)
+        public VisibilityManager(IVisibilityStrategy strategy, IClock clock) 
         {
             _strategy = strategy ?? throw new ArgumentNullException(nameof(strategy));
+            _clock = clock ?? throw new ArgumentNullException(nameof(clock)); // Clock is now mandatory for throttling
             Logger.Log("[VisibilityManager] Initialized.");
         }
 
@@ -29,17 +39,29 @@ namespace Core.Visibility
             if (_isDisposed || clientView == null) return;
 
             bool isNewClient = !_registeredClients.ContainsKey(clientView.ClientId);
+            Vector3 oldPosition = Vector3.Zero;
+            if (!isNewClient && _clientLastPvsUpdatePosition.TryGetValue(clientView.ClientId, out var pos))
+            {
+                oldPosition = pos;
+            }
+
             _registeredClients[clientView.ClientId] = clientView;
             _strategy.AddOrUpdateClientView(clientView);
 
             if (isNewClient)
             {
                 _clientVisibleSets[clientView.ClientId] = new HashSet<int>();
-                // Logger.Log($"[VisibilityManager] Added new Client View: {clientView.ClientId}");
-                // Optionally, immediately update visibility for this new client
-                // UpdateClientVisibility(clientView.ClientId);
+                _clientLastPvsUpdateTime[clientView.ClientId] = -StationaryClientPvsUpdateInterval; // Force initial update
+                _clientLastPvsUpdatePosition[clientView.ClientId] = clientView.Position;
             }
-            // else { Logger.Log($"[VisibilityManager] Updated Client View: {clientView.ClientId}"); }
+            else
+            {
+                // If client moved, ensure its _clientLastPvsUpdatePosition is updated
+                // so the next PVS check uses the correct "previous" position for movement threshold.
+                // The actual PVS update will be throttled by UpdateAllClientVisibility.
+                // No, this update happens *within* UpdateAllClientVisibility after PVS calc.
+                // Here, we just acknowledge the clientView might have new data.
+            }
         }
 
         public void RemoveClientView(int clientId)
@@ -50,6 +72,8 @@ namespace Core.Visibility
                 _strategy.RemoveClientView(clientView);
                 _registeredClients.Remove(clientId);
                 _clientVisibleSets.Remove(clientId);
+                _clientLastPvsUpdateTime.Remove(clientId);
+                _clientLastPvsUpdatePosition.Remove(clientId);
                 Logger.Log($"[VisibilityManager] Removed Client View: {clientId}");
             }
         }
@@ -57,67 +81,104 @@ namespace Core.Visibility
         public void RegisterEntity(Entity entity)
         {
             if (_isDisposed || entity == null) return;
-            // We register even if dead, so UnregisterEntity can clean it up properly from strategy
-            // if it was previously alive and registered.
-            // However, visibility calculation should only consider alive entities.
-
+            
+            // The IVisibilityStrategy (spatial index) is primarily updated by Level.cs
+            // when entities are added, removed, or move.
+            // This method ensures VisibilityManager's internal _registeredEntities list is up-to-date.
             if (!_registeredEntities.ContainsKey(entity.Id))
             {
                 _registeredEntities.Add(entity.Id, entity);
-                _strategy.AddOrUpdateEntity(entity); // Add to strategy
-                // Logger.Log($"[VisibilityManager] Registered Entity: {entity.Id}");
             }
             else
             {
-                _strategy.AddOrUpdateEntity(entity); // Update position in strategy
-                // Logger.Log($"[VisibilityManager] Updated Entity Position: {entity.Id}");
+                _registeredEntities[entity.Id] = entity; // Update reference if it changed
+            }
+
+            if (entity.IsDead) 
+            {
+                RemoveEntityFromAllClientPVS(entity.Id);
+                // Also ensure strategy knows it's dead / removed from active set
+                // Level.cs handles strategy.RemoveEntity on actual removal.
+                // If it's just marked dead but not yet removed from Level's list, strategy might still have it.
+                // It's safer if strategy queries only consider non-dead entities, or Level removes from strategy promptly.
+                // Current strategy.FindVisibleEntities is expected to return only alive entities (via filter in VM).
             }
         }
 
         public void UnregisterEntity(int entityId)
         {
             if (_isDisposed) return;
-            if (_registeredEntities.TryGetValue(entityId, out var entity))
+            _registeredEntities.Remove(entityId);
+            RemoveEntityFromAllClientPVS(entityId);
+            // Strategy removal is handled by Level.cs
+        }
+        
+        private void RemoveEntityFromAllClientPVS(int entityId)
+        {
+            foreach (var kvp in _clientVisibleSets) // Iterate copy if modifying
             {
-                _strategy.RemoveEntity(entity);
-                _registeredEntities.Remove(entityId);
-                // Logger.Log($"[VisibilityManager] Unregistered Entity: {entityId}");
-
-                foreach (var kvp in _clientVisibleSets)
+                HashSet<int> visibleSet = kvp.Value;
+                if (visibleSet.Remove(entityId))
                 {
-                    if (kvp.Value.Remove(entityId))
-                    {
-                        EntityLeftPvs?.Invoke(kvp.Key, entityId);
-                    }
+                    EntityLeftPvs?.Invoke(kvp.Key, entityId);
                 }
             }
         }
 
         public void UpdateAllClientVisibility()
         {
-             if (_isDisposed) return;
-            var clientIds = _registeredClients.Keys.ToList(); // Iterate a copy
-             foreach (int clientId in clientIds)
-             {
-                 if(_registeredClients.ContainsKey(clientId)) // Check if client still exists
+            if (_isDisposed) return;
+            var clientIds = _registeredClients.Keys.ToList(); 
+            float currentTime = _clock.CurrentTime;
+
+            foreach (int clientId in clientIds)
+            {
+                if (!_registeredClients.TryGetValue(clientId, out var clientView)) continue;
+
+                bool needsPvsUpdate = false;
+                // Ensure throttling data exists (should be set in AddOrUpdateClientView)
+                if (!_clientLastPvsUpdateTime.ContainsKey(clientId))
+                {
+                     _clientLastPvsUpdateTime[clientId] = -StationaryClientPvsUpdateInterval; 
+                     _clientLastPvsUpdatePosition[clientId] = clientView.Position;
+                }
+
+                if ((clientView.Position - _clientLastPvsUpdatePosition[clientId]).SqrMagnitude > ClientMovementPvsUpdateThresholdSq)
+                {
+                    needsPvsUpdate = true;
+                }
+                else if (currentTime - _clientLastPvsUpdateTime[clientId] >= StationaryClientPvsUpdateInterval)
+                {
+                    needsPvsUpdate = true;
+                }
+                
+
+                if (needsPvsUpdate)
+                {
+                    // Logger.Log($"[VisibilityManager] Updating PVS for Client {clientId}. Reason: {(clientView.Position - _clientLastPvsUpdatePosition[clientId]).SqrMagnitude > ClientMovementPvsUpdateThresholdSq} move, {currentTime - _clientLastPvsUpdateTime[clientId] >= StationaryClientPvsUpdateInterval} time");
                     UpdateClientVisibility(clientId);
-             }
+                    _clientLastPvsUpdateTime[clientId] = currentTime;
+                    _clientLastPvsUpdatePosition[clientId] = clientView.Position;
+                }
+            }
         }
 
-        public void UpdateClientVisibility(int clientId)
+        // Made public for potential direct calls if needed, but usually called by UpdateAllClientVisibility
+        public void UpdateClientVisibility(int clientId) 
         {
             if (_isDisposed) return;
             if (!_registeredClients.TryGetValue(clientId, out var clientView)) return;
             if (!_clientVisibleSets.TryGetValue(clientId, out var previousVisibleSet))
             {
+                 // This case should ideally not happen if AddOrUpdateClientView correctly initializes.
+                 Logger.LogWarning($"[VisibilityManager] Client {clientId} had no previousVisibleSet. Creating one.");
                  previousVisibleSet = new HashSet<int>();
                  _clientVisibleSets[clientId] = previousVisibleSet;
             }
 
-            // Query strategy only for entities that are NOT dead.
-            // The strategy itself might not know about IsDead.
             var currentVisibleCandidates = _strategy.FindVisibleEntities(clientView);
-            var currentVisibleSet = new HashSet<int>();
+            var currentVisibleSet = new HashSet<int>(); // Will store IDs of entities that are alive and in range
+
             foreach(var entityId in currentVisibleCandidates)
             {
                 if(_registeredEntities.TryGetValue(entityId, out var entity) && !entity.IsDead)
@@ -125,20 +186,35 @@ namespace Core.Visibility
                     currentVisibleSet.Add(entityId);
                 }
             }
-
-
-            var enteredEntities = currentVisibleSet.Except(previousVisibleSet).ToList();
-            var leftEntities = previousVisibleSet.Except(currentVisibleSet).ToList();
-
-            foreach (int entityId in enteredEntities)
+            
+            // Find entities that entered PVS
+            foreach (int entityIdInCurrent in currentVisibleSet)
             {
-                EntityEnteredPvs?.Invoke(clientId, entityId);
-                previousVisibleSet.Add(entityId);
+                if (!previousVisibleSet.Contains(entityIdInCurrent)) // It's new
+                {
+                    previousVisibleSet.Add(entityIdInCurrent); // Add to the persistent set for this client
+                    EntityEnteredPvs?.Invoke(clientId, entityIdInCurrent);
+                }
             }
-            foreach (int entityId in leftEntities)
+
+            // Find entities that left PVS
+            List<int> leftPvsBuffer = null; // Lazy init
+            foreach (int entityIdInPrevious in previousVisibleSet)
             {
-                EntityLeftPvs?.Invoke(clientId, entityId);
-                previousVisibleSet.Remove(entityId);
+                if (!currentVisibleSet.Contains(entityIdInPrevious)) // It's no longer in current
+                {
+                    if (leftPvsBuffer == null) leftPvsBuffer = new List<int>();
+                    leftPvsBuffer.Add(entityIdInPrevious);
+                    EntityLeftPvs?.Invoke(clientId, entityIdInPrevious);
+                }
+            }
+
+            if (leftPvsBuffer != null)
+            {
+                foreach (int entityIdToRemove in leftPvsBuffer)
+                {
+                    previousVisibleSet.Remove(entityIdToRemove); // Remove from the persistent set
+                }
             }
         }
 
@@ -151,24 +227,25 @@ namespace Core.Visibility
         public IEnumerable<int> GetClientsSeeingEntity(int entityId)
         {
              if (_isDisposed) return Enumerable.Empty<int>();
-             return _clientVisibleSets
-                 .Where(kvp => kvp.Value.Contains(entityId))
-                 .Select(kvp => kvp.Key);
+             List<int> clients = new List<int>();
+             foreach(var kvp in _clientVisibleSets)
+             {
+                 if (kvp.Value.Contains(entityId))
+                 {
+                     clients.Add(kvp.Key);
+                 }
+             }
+             return clients;
         }
-
-        /// <summary>
-        /// Gets the current PVS (Potentially Visible Set) of entity IDs for a specific client.
-        /// This reflects the last calculated visibility state.
-        /// </summary>
+        
         public IReadOnlyCollection<int> GetPVSForClient(int clientId)
         {
             if (_isDisposed) return Array.Empty<int>();
             if (_clientVisibleSets.TryGetValue(clientId, out var visibleSet))
             {
-                // Return a read-only copy or wrapper to prevent external modification
-                return visibleSet.ToList().AsReadOnly(); // ToList creates a copy
+                return visibleSet.ToList().AsReadOnly(); 
             }
-            return Array.Empty<int>(); // Client not found or no PVS calculated yet
+            return Array.Empty<int>(); 
         }
 
 
@@ -177,10 +254,15 @@ namespace Core.Visibility
             if (_isDisposed) return;
             _isDisposed = true;
             Logger.Log("[VisibilityManager] Disposing...");
-            _strategy?.Dispose();
+            
+            // The strategy is passed in, so CoreComposer (its creator) is responsible for disposing it.
+            // (_strategy as IDisposable)?.Dispose(); 
+            
             _registeredEntities.Clear();
             _registeredClients.Clear();
             _clientVisibleSets.Clear();
+            _clientLastPvsUpdateTime.Clear();
+            _clientLastPvsUpdatePosition.Clear();
             EntityEnteredPvs = null;
             EntityLeftPvs = null;
             Logger.Log("[VisibilityManager] Dispose complete.");
