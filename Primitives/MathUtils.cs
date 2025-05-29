@@ -1,8 +1,7 @@
-// File: Core/Model/MathUtils.cs (assuming it's part of Core.Model or a new Core.Utils)
-// Or Core.Primitives if it's more fundamental like Vector/Quaternion
-namespace Core.Primitives // Placing in Primitives as it's a fundamental math helper
+// File: Core/Primitives/MathUtils.cs 
+namespace Core.Primitives 
 {
-    using System; // For MathF
+    using System; // For MathF, Math.Clamp
 
     public static class MathUtils
     {

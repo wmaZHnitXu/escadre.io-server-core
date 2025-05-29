@@ -3,8 +3,6 @@ namespace Core.Ocean
 {
     using Core.Primitives;
     using System;
-    using MathUtils = Primitives.MathUtils; // Alias to avoid conflict if a Core.Model.MathUtils exists
-
     public class DefaultFloatingBehavior : IFloatingBehavior
     {
         private readonly IOceanDataProvider _oceanDataProvider;

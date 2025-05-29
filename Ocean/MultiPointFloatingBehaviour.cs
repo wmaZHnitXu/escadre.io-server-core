@@ -5,7 +5,6 @@ namespace Core.Ocean
     using System;
     using System.Collections.Generic;
     using System.Linq;
-    using MathUtils = Primitives.MathUtils; // Alias
 
     public class MultiPointFloatingBehavior : IFloatingBehavior
     {
