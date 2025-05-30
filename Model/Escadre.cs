@@ -14,22 +14,15 @@ namespace Core.Model
         public int OwnerClientId { get; }
         public string Nickname { get; private set; }
 
-        // _level is inherited from Entity as protected
-        // Level _level => base._level; // No, just use _level directly from base
-
         private readonly List<int> _shipEntityIds = new List<int>();
         public IReadOnlyList<int> ShipEntityIds => _shipEntityIds.AsReadOnly();
 
-        private Vector2? _currentDestination;
+        private Vector2? _currentDestination; // User-commanded destination for the fleet
         public Vector2? CurrentDestination { get => _currentDestination; private set => _currentDestination = value; }
 
-        // _currentFormationAnchorTarget is now this.Position (from Entity)
-        // _isFormationAnchorMoving: logic will determine if this.Position needs to change
+        private Vector3 _fleetCommandTargetPoint; // The point the fleet as a whole is trying to reach or orient towards
+        private bool _isFleetMovingToTarget;
 
-        private readonly HashSet<int> _targetEscadreOwnerClientIds = new HashSet<int>(); // This might change to target Escadre Entity IDs
-        public IReadOnlyCollection<int> TargetEscadreOwnerClientIds => _targetEscadreOwnerClientIds;
-        
-        // Store target Escadre Entity IDs
         private readonly HashSet<int> _targetEscadreEntityIds = new HashSet<int>();
         public IReadOnlyCollection<int> TargetEscadreEntityIds => _targetEscadreEntityIds;
 
@@ -43,25 +36,24 @@ namespace Core.Model
         public Formation CurrentFormation { get; private set; }
         private bool _isDisbanding = false; 
 
-        private const float ESCADRE_MAX_SPEED = 3.5f;
-        private const float ESCADRE_ACCELERATION = 2.0f;
-        private float _currentEscadreSpeed = 0f;
-
 
         public Escadre(Level level, int ownerClientId, string nickname, Vector3 initialPosition) : base(level)
         {
             OwnerClientId = ownerClientId;
             Nickname = nickname ?? $"Escadre_{OwnerClientId}";
-            // base._level is already set by Entity constructor
             
-            this.Position = initialPosition; // Set initial position of the Escadre entity
-            this.Rotation = Quaternion.Identity; // Default rotation
+            // Initial position of the Escadre entity itself is set by the constructor
+            // but will be dynamically updated to the average of its ships.
+            // For the very first frame before any ships are added, it will be this initialPosition.
+            // Or, if ships are added immediately, it will update quickly.
+            this.Position = initialPosition; 
+            this.Rotation = Quaternion.Identity; 
+            _fleetCommandTargetPoint = initialPosition; // Initially, command target is current position
+            _isFleetMovingToTarget = false;
 
             _resources = 1000; 
             CurrentFormation = new Formation(OwnerClientId, new DefaultFormationValidationStrategy());
             CurrentFormation.OnFormationLayoutChanged += HandleInternalFormationLayoutChange;
-            // _currentFormationAnchorTarget = CalculateCenterPoint(); // No, use this.Position
-            // _isFormationAnchorMoving = false; // Will be determined by commands
         }
 
         private void HandleInternalFormationLayoutChange()
@@ -91,7 +83,7 @@ namespace Core.Model
 
         public int GetUpgradeCostForShip(Ship ship)
         {
-            return 50;
+            return 50; // Placeholder
         }
 
         internal void AddShip(Ship ship, Vector2? initialFormationOffset = null)
@@ -103,7 +95,6 @@ namespace Core.Model
             }
             if (!_shipEntityIds.Contains(ship.Id)) {
                 _shipEntityIds.Add(ship.Id);
-                // Formation logic remains similar
                 bool addedToFormation;
                 Vector2 finalOffset;
                 if (initialFormationOffset.HasValue)
@@ -118,6 +109,11 @@ namespace Core.Model
                      if(!addedToFormation) Logger.LogWarning($"[Escadre {Id} (Owner {OwnerClientId})] Failed to auto-assign ship {ship.Id} to formation.");
                 }
                 Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Added Ship {ship.Id} at formation offset {finalOffset}. Total ships: {_shipEntityIds.Count}");
+                // Initial position of escadre might need an immediate update if this is the first ship
+                if (_shipEntityIds.Count == 1)
+                {
+                    _fleetCommandTargetPoint = ship.Position; // Center command on the first ship initially
+                }
             }
         }
 
@@ -128,8 +124,8 @@ namespace Core.Model
                 CurrentFormation.RemoveShip(shipId);
                 Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Removed Ship {shipId}. Total ships: {_shipEntityIds.Count}");
                 if (!_shipEntityIds.Any()) {
-                    Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] All ships lost!");
-                    _currentEscadreSpeed = 0f; // Stop moving if no ships
+                    Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] All ships lost! Escadre might become static or be destroyed.");
+                    _isFleetMovingToTarget = false; // Stop commanding movement if no ships
                 }
             }
         }
@@ -137,11 +133,10 @@ namespace Core.Model
         internal void HandleShipDestroyed(int shipId)
         {
             RemoveShip(shipId);
-            // If all ships are destroyed, the Escadre itself should be considered destroyed.
-            if (!_shipEntityIds.Any() && !IsDead) // Check !IsDead to prevent re-entry if already dying
+            if (!_shipEntityIds.Any() && !IsDead) 
             {
                 Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] All ships lost! Initiating Escadre Kill().");
-                this.Kill(); // This will trigger Death() and then Disband()
+                this.Kill(); 
             }
         }
 
@@ -149,18 +144,18 @@ namespace Core.Model
         {
             if (_isDisbanding || IsDead) return;
             CurrentDestination = destination;
-            // _isFormationAnchorMoving = true; // Logic will determine if Position changes
-            if (TargetEscadreEntityIds.Any() || TargetEscadreOwnerClientIds.Any()) { // Clear both target lists
+            _fleetCommandTargetPoint = new Vector3(destination.X, this.Position.Y, destination.Y); // Y is current avg, will adjust
+            _isFleetMovingToTarget = true;
+
+            if (TargetEscadreEntityIds.Any()) { 
                 _targetEscadreEntityIds.Clear();
-                _targetEscadreOwnerClientIds.Clear(); // Keep for compatibility if some systems still use it briefly
                 Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Setting course to {destination}. Cancelling attack orders.");
             } else {
                 Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Setting course to {destination}.");
             } 
-            UpdateFormationAnchorAndShipTargets(0f, serverTime);
+            UpdateShipMovementTargets(serverTime);
         }
         
-        // New method to target Escadre Entity
         public void OrderAttackEscadreEntity(int targetEscadreEntityId, float serverTime)
         {
             if (_isDisbanding || IsDead) return;
@@ -174,13 +169,11 @@ namespace Core.Model
                 if (_targetEscadreEntityIds.Add(targetEscadreEntityId)) {
                      Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Added attack order on escadre entity {targetEscadreEntityId} (Owner {targetEscadre.OwnerClientId}).");
                 }
-                // Optionally, for compatibility or if some systems still rely on it, populate TargetEscadreOwnerClientIds
-                _targetEscadreOwnerClientIds.Add(targetEscadre.OwnerClientId);
-
-
+                _fleetCommandTargetPoint = targetEscadre.Position; // Initial command point
+                _isFleetMovingToTarget = true;
                 CurrentDestination = null; // Clear fixed destination
                 Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Attack order on entity {targetEscadreEntityId} initiated. Cancelling fixed movement orders.");
-                UpdateFormationAnchorAndShipTargets(0f, serverTime);
+                UpdateShipMovementTargets(serverTime);
             }
             else
             {
@@ -188,70 +181,26 @@ namespace Core.Model
             }
         }
 
-
-        // Kept for potential compatibility, but should be deprecated in favor of OrderAttackEscadreEntity
-        public void OrderAttack(int targetOwnerClientId, float serverTime)
-        {
-            if (_isDisbanding || IsDead) return;
-            if (targetOwnerClientId == OwnerClientId) {
-                Logger.LogWarning($"[Escadre {Id} (Owner {OwnerClientId})] Cannot target self (owner) for attack.");
-                return;
-            }
-            // Find the Escadre entity for this owner
-            Escadre targetEscadre = _level.GetAllEntities().OfType<Escadre>().FirstOrDefault(e => e.OwnerClientId == targetOwnerClientId && e.Id != this.Id);
-            if (targetEscadre != null)
-            {
-                OrderAttackEscadreEntity(targetEscadre.Id, serverTime);
-            }
-            else
-            {
-                 Logger.LogWarning($"[Escadre {Id} (Owner {OwnerClientId})] Could not find an Escadre entity for owner {targetOwnerClientId} to attack.");
-            }
-        }
-
-
         public void OrderCancelAttack() 
         {
             if (_isDisbanding || IsDead) return;
-            bool hadTargets = TargetEscadreEntityIds.Any() || TargetEscadreOwnerClientIds.Any();
+            bool hadTargets = TargetEscadreEntityIds.Any();
             if (hadTargets) {
                 _targetEscadreEntityIds.Clear();
-                _targetEscadreOwnerClientIds.Clear();
                 Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Cancelling ALL attack orders.");
-                if (!CurrentDestination.HasValue) // If no other move order, escadre stops
+                if (!CurrentDestination.HasValue) 
                 {
-                    _currentEscadreSpeed = 0f;
+                    _isFleetMovingToTarget = false;
                 }
-                UpdateFormationAnchorAndShipTargets(0f, _level.CurrentTime); 
+                UpdateShipMovementTargets(_level.CurrentTime); 
             } else {
                 Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] No active attack orders to cancel.");
             }
-        }
-
-        // Cancel attack on a specific escadre entity
-        public void OrderCancelAttackOnEscadreEntity(int targetEscadreEntityId)
-        {
-            if (_isDisbanding || IsDead) return;
-             if (_level.TryGetEntity(targetEscadreEntityId, out Entity targetEntity) && targetEntity is Escadre targetEscadre)
-             {
-                bool removed = _targetEscadreEntityIds.Remove(targetEscadreEntityId);
-                removed |= _targetEscadreOwnerClientIds.Remove(targetEscadre.OwnerClientId); // Also remove by owner ID
-
-                if (removed) {
-                    Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Cancelled attack order on escadre entity {targetEscadreEntityId} (Owner {targetEscadre.OwnerClientId}).");
-                    if (!TargetEscadreEntityIds.Any() && !CurrentDestination.HasValue) {
-                         Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] No remaining attack targets or destinations. Escadre stopping.");
-                         _currentEscadreSpeed = 0f;
-                    }
-                    UpdateFormationAnchorAndShipTargets(0f, _level.CurrentTime);
-                }
-             }
         }
         
         public bool RequestSetFormation(List<Tuple<int, Vector2>> newFormationSlots, float serverTime)
         {
             if (_isDisbanding || IsDead) return false;
-            // ... (validation logic remains the same)
             var proposedSlots = new List<FormationSlot>();
             bool allShipsFound = true;
             foreach (var slotData in newFormationSlots)
@@ -294,154 +243,142 @@ namespace Core.Model
             if (changed)
             {
                 Logger.Log($"[Escadre {Id}] Formation updated successfully via request.");
+                // UpdateShipMovementTargets is called by HandleInternalFormationLayoutChange
                 return true;
             }
             return false; 
         }
 
-        // Update is inherited from Entity. We override it to add Escadre-specific logic.
         public override void Update(float deltaTime)
         {
-            base.Update(deltaTime); // Call base Entity.Update if it had any logic
+            base.Update(deltaTime); // Handles base Entity floating behavior if any (Escadre typically doesn't float itself)
 
-            if (IsDead || _isDisbanding || !_shipEntityIds.Any())
+            if (IsDead || _isDisbanding) return;
+
+            // 1. Update _fleetCommandTargetPoint based on current orders
+            if (TargetEscadreEntityIds.Any())
             {
-                _currentEscadreSpeed = 0f;
-                return;
+                int primaryTargetId = TargetEscadreEntityIds.First(); // Simple: focus on first target
+                if (_level.TryGetEntity(primaryTargetId, out Entity targetEntity) && targetEntity is Escadre enemyEscadre && !enemyEscadre.IsDead)
+                {
+                    _fleetCommandTargetPoint = enemyEscadre.Position;
+                    _isFleetMovingToTarget = true;
+                }
+                else // Target lost or dead
+                {
+                    _targetEscadreEntityIds.Remove(primaryTargetId);
+                    if (!_targetEscadreEntityIds.Any()) _isFleetMovingToTarget = false;
+                }
+            }
+            else if (CurrentDestination.HasValue)
+            {
+                Vector3 currentFleetCommandTarget3D = new Vector3(CurrentDestination.Value.X, this.Position.Y, CurrentDestination.Value.Y);
+                 // Check if reached destination
+                if ((currentFleetCommandTarget3D - _fleetCommandTargetPoint).SqrMagnitude < 1.0f * 1.0f) // If close enough to target
+                {
+                     // More precise check could be against average ship position
+                     Vector3 avgPos = CalculateAverageShipPosition();
+                     if ((new Vector2(avgPos.X, avgPos.Z) - CurrentDestination.Value).SqrMagnitude < 2.0f * 2.0f)
+                     {
+                        CurrentDestination = null;
+                        _isFleetMovingToTarget = false;
+                        Logger.Log($"[Escadre {Id}] Reached destination. Stopping commanded movement.");
+                     } else {
+                        _fleetCommandTargetPoint = currentFleetCommandTarget3D; // Update Y if needed
+                        _isFleetMovingToTarget = true;
+                     }
+                } else {
+                     _fleetCommandTargetPoint = currentFleetCommandTarget3D;
+                     _isFleetMovingToTarget = true;
+                }
+            }
+            else
+            {
+                _isFleetMovingToTarget = false; // No explicit orders
+            }
+
+            // 2. Calculate current average ship position and set Escadre.Position
+            Vector3 newAveragePosition = CalculateAverageShipPosition();
+            if (this.Position != newAveragePosition)
+            {
+                this.Position = newAveragePosition; // This updates the base Entity._position
             }
             
-            // If there's a destination or attack target, update anchor and ship targets
-            if (CurrentDestination.HasValue || TargetEscadreEntityIds.Any())
+            // 3. Update Escadre.Rotation (general fleet orientation)
+            if (_isFleetMovingToTarget && (_fleetCommandTargetPoint - this.Position).SqrMagnitude > 0.1f)
             {
-                UpdateFormationAnchorAndShipTargets(deltaTime, _level.CurrentTime);
-            } else { // No explicit move/attack order
-                 _currentEscadreSpeed = Math.Max(0, _currentEscadreSpeed - ESCADRE_ACCELERATION * deltaTime * 2f); // Decelerate if no order
-                 if (_currentEscadreSpeed == 0) {
-                    // If stopped and no orders, ensure ships just hold formation relative to static anchor
-                    // UpdateShipMovementTargets(_level.CurrentTime); // could be called to reinforce, but UpdateFormationAnchorAndShipTargets handles it
-                 }
+                Vector3 directionToCommandTarget = (_fleetCommandTargetPoint - this.Position).Normalized;
+                if (directionToCommandTarget.SqrMagnitude > Vector3.Epsilon)
+                {
+                    this.Rotation = Quaternion.LookRotation(directionToCommandTarget, Vector3.Up);
+                }
             }
-            // Individual ships still run their own Ship.Update() via Level.DoUpdate()
+            // else: maintain current rotation or gradually return to a default if desired. For now, maintain.
+
+            // 4. Update individual ship movement targets
+            UpdateShipMovementTargets(_level.CurrentTime);
         }
 
-        private void UpdateFormationAnchorAndShipTargets(float deltaTime, float serverTime)
+        private Vector3 CalculateAverageShipPosition()
         {
-            if (IsDead) return;
-
-            Vector3 ultimateTargetPoint = this.Position; // Default to current anchor if no other goal
-            bool hasUltimateTarget = false;
-            bool shouldBeMoving = false;
-
-
-            if (CurrentDestination.HasValue)
+            if (!_shipEntityIds.Any())
             {
-                ultimateTargetPoint = new Vector3(CurrentDestination.Value.X, this.Position.Y, CurrentDestination.Value.Y);
-                hasUltimateTarget = true;
-                shouldBeMoving = true;
+                // If no ships, Escadre position might be its last known average, or _fleetCommandTargetPoint if stationary
+                return _isFleetMovingToTarget ? _fleetCommandTargetPoint : this.Position;
             }
-            else if (TargetEscadreEntityIds.Any())
+
+            Vector3 sumPositions = Vector3.Zero;
+            int aliveShipCount = 0;
+            foreach (int shipId in _shipEntityIds)
             {
-                int primaryTargetEntityId = TargetEscadreEntityIds.First();
-                if (_level.TryGetEntity(primaryTargetEntityId, out Entity enemyEntity) && enemyEntity is Escadre enemyEscadre && !enemyEscadre.IsDead)
+                if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
                 {
-                    if (enemyEscadre.ShipEntityIds.Any()) // Only move if target has ships
-                    {
-                        ultimateTargetPoint = enemyEscadre.Position; // Target the enemy escadre's anchor
-                        hasUltimateTarget = true;
-                        shouldBeMoving = true;
-                    }
-                    else // Target escadre has no ships, remove it as a target
-                    {
-                        Logger.Log($"[Escadre {Id}] Target Escadre {primaryTargetEntityId} has no ships. Removing as attack target.");
-                        _targetEscadreEntityIds.Remove(primaryTargetEntityId);
-                        _targetEscadreOwnerClientIds.Remove(enemyEscadre.OwnerClientId); // Also from old list
-                        if (!TargetEscadreEntityIds.Any()) shouldBeMoving = false; // Stop if no more targets
-                    }
-                }
-                else // Target escadre entity doesn't exist or is dead
-                {
-                    Logger.Log($"[Escadre {Id}] Target Escadre {primaryTargetEntityId} not found/valid/alive. Removing as attack target.");
-                    _targetEscadreEntityIds.Remove(primaryTargetEntityId);
-                    // Attempt to remove from owner ID list too, if possible (requires lookup or storing mapping)
-                    // For now, just clear from entity ID list.
-                    if (!TargetEscadreEntityIds.Any()) shouldBeMoving = false;
+                    sumPositions += ship.Position;
+                    aliveShipCount++;
                 }
             }
-            else // No destination, no attack targets
-            {
-                 shouldBeMoving = false;
-            }
 
-            if (!shouldBeMoving)
+            if (aliveShipCount > 0)
             {
-                _currentEscadreSpeed = Math.Max(0, _currentEscadreSpeed - ESCADRE_ACCELERATION * deltaTime * 2f); // Decelerate
+                return sumPositions / aliveShipCount;
             }
-            else if (hasUltimateTarget && deltaTime >= 0) // Allow 0 deltaTime for initial setup
-            {
-                Vector3 directionToUltimateTarget = ultimateTargetPoint - this.Position;
-                float distanceToUltimateTargetSq = directionToUltimateTarget.SqrMagnitude;
-
-                float stoppingDistThreshold = 0.5f; // Stop if this close
-                if (distanceToUltimateTargetSq < stoppingDistThreshold * stoppingDistThreshold)
-                {
-                    this.Position = ultimateTargetPoint; // Snap to final point
-                    _currentEscadreSpeed = 0f;
-                    if (CurrentDestination.HasValue) CurrentDestination = null; // Clear fixed destination once reached
-                    // If it was an attack target, don't clear it - stay near it.
-                }
-                else
-                {
-                    if (_currentEscadreSpeed < ESCADRE_MAX_SPEED)
-                    {
-                        _currentEscadreSpeed = Math.Min(ESCADRE_MAX_SPEED, _currentEscadreSpeed + ESCADRE_ACCELERATION * deltaTime);
-                    }
-                    // Update Escadre's own position
-                    this.Position += directionToUltimateTarget.Normalized * _currentEscadreSpeed * deltaTime;
-                    
-                    // Update Escadre's rotation to face movement direction
-                    if (_currentEscadreSpeed > 0.1f && directionToUltimateTarget.SqrMagnitude > Vector3.Epsilon)
-                    {
-                        this.Rotation = Quaternion.LookRotation(directionToUltimateTarget.Normalized, Vector3.Up);
-                    }
-                }
-            }
-            UpdateShipMovementTargets(serverTime);
+            return _isFleetMovingToTarget ? _fleetCommandTargetPoint : this.Position; // Fallback if all listed ships are dead/gone
         }
 
-        // CalculateEscadreOrientationForMovement is now handled by this.Rotation which is updated in UpdateFormationAnchorAndShipTargets
-        // internal Quaternion CalculateEscadreOrientationForMovement() { ... } // REMOVE
 
         internal void UpdateShipMovementTargets(float serverTime)
         {
-            if (_isDisbanding || IsDead || !_shipEntityIds.Any()) return;
+            if (_isDisbanding || IsDead) return;
 
-            Quaternion escadreOrientation = this.Rotation; // Use the Escadre entity's current rotation
+            Vector3 referencePointForFormation; // The point around which ships should form up.
+            if (_isFleetMovingToTarget)
+            {
+                referencePointForFormation = _fleetCommandTargetPoint;
+            }
+            else // Not moving to a specific target, ships should hold formation around current Escadre (average) position
+            {
+                referencePointForFormation = this.Position; 
+            }
+
+            Quaternion fleetOrientation = this.Rotation; // Use the Escadre entity's current (commanded) rotation
 
             foreach (int shipId in _shipEntityIds)
             {
                 if (_level.TryGetEntity(shipId, out Entity entity) && entity is Ship ship && !ship.IsDead)
                 {
-                    // Use this.Position as the escadreCenterPosition
-                    Vector3 targetShipWorldPosition = CurrentFormation.GetTargetWorldPositionForShip(shipId, this.Position, escadreOrientation);
+                    Vector2 relativeOffset2D = CurrentFormation.GetShipRelativeOffset(shipId);
+                    Vector3 relativeOffset3D = new Vector3(relativeOffset2D.X, 0, relativeOffset2D.Y);
+                    Vector3 worldOffsetFromReference = fleetOrientation * relativeOffset3D;
+                    
+                    Vector3 targetShipWorldPosition = referencePointForFormation + worldOffsetFromReference;
                     ship.SetMovementTarget(new Vector2(targetShipWorldPosition.X, targetShipWorldPosition.Z), serverTime);
                 }
             }
         }
-
-        // CalculateCenterPoint is used by ClientConnection.Position, still useful for PVS center if Escadre entity Position isn't it.
-        // However, Escadre.Position *should* be the PVS center.
-        // This method can be used to determine the *actual geometric center* of ships if needed,
-        // distinct from the formation anchor (this.Position).
-        public Vector3 CalculateGeometricCenterOfShips()
+        
+        public Vector3 CalculateGeometricCenterOfShips() // This is essentially CalculateAverageShipPosition
         {
-            if (!_shipEntityIds.Any()) return this.Position; // Fallback to anchor if no ships
-            Vector3 sumPositions = Vector3.Zero; int aliveShipCount = 0;
-            foreach (int shipIdInList in _shipEntityIds) {
-                if (_level.TryGetEntity(shipIdInList, out Entity entityInLevel) && entityInLevel is Ship && !entityInLevel.IsDead) {
-                    sumPositions += entityInLevel.Position; aliveShipCount++;
-                }
-            }
-            return aliveShipCount > 0 ? sumPositions / aliveShipCount : this.Position; 
+            return CalculateAverageShipPosition();
         }
 
         internal void Disband(bool silentKillShips = true)
@@ -449,11 +386,9 @@ namespace Core.Model
             _isDisbanding = true; 
             Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Disbanding (silentKillShips: {silentKillShips}).");
             
-            // Clear attack/move orders
             CurrentDestination = null;
             _targetEscadreEntityIds.Clear();
-            _targetEscadreOwnerClientIds.Clear();
-            _currentEscadreSpeed = 0f;
+            _isFleetMovingToTarget = false;
 
             var idsToKill = new List<int>(_shipEntityIds); 
             foreach (int shipIdInList in idsToKill) {
@@ -464,33 +399,30 @@ namespace Core.Model
             }
             _shipEntityIds.Clear(); 
             CurrentFormation.RemoveAllShips(); 
-            _isDisbanding = false; // Reset flag after disbanding
+            _isDisbanding = false; 
         }
 
-        // Override Entity.Death() for specific Escadre death behavior
         protected override void Death()
         {
-            base.Death(); // Call base Entity.Death if it has any logic
+            base.Death(); 
             Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Performing Death(). Disbanding ships non-silently.");
-            Disband(false); // Disband ships, they can have their own destruction effects
+            Disband(false); 
         }
 
         protected override void ObligatoryOnRemove()
         {
             base.ObligatoryOnRemove();
              Logger.Log($"[Escadre {Id} (Owner {OwnerClientId})] Performing ObligatoryOnRemove().");
-            // Ensure all resources are cleaned up
-            if (!_isDisbanding) // If not already called by Kill->Death->Disband
+            if (!_isDisbanding) 
             {
-                Disband(true); // Silently clean up ships if escadre is removed directly
+                Disband(true); 
             }
-            // Nullify events to help GC and prevent further calls
             OnResourcesChanged = null;
             OnFormationChanged = null;
             if (CurrentFormation != null)
             {
                 CurrentFormation.OnFormationLayoutChanged -= HandleInternalFormationLayoutChange;
-                CurrentFormation.RemoveAllShips(); // Ensure formation is also cleared
+                CurrentFormation.RemoveAllShips(); 
             }
         }
     }

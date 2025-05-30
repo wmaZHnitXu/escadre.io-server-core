@@ -7,57 +7,42 @@ using Core.Model;
 using Core.Primitives;
 using Core.Network;
 using Core.Logging;
-using Core.Client; // For ClientLevel (though client proxy uses base.OwningClientLevel)
+using Core.Client; 
 
 namespace Core.Network.Proxies
 {
-    // This enum is for specific events on the Escadre entity itself.
-    // Common state like Nickname, Resources, Formation will be part of CreateEntity/UpdateState.
-    // However, frequent updates like Resources and Formation might benefit from specific events
-    // to avoid sending the whole state block if only one thing changed.
-    // For now, let's try to include them in the standard state updates.
-    // If checksums and UpdateState become too heavy, we can introduce these events.
     internal enum EscadreEventType : byte
     {
-        // Example: ResourcesChanged = 1, (payload: new resource amount)
-        // Example: FormationLayoutChanged = 2, (payload: new formation slot list)
-        // Example: NicknameChanged = 3 (payload: new nickname string)
-        ShopInfoUpdated = 4 // Special event to send shop designs if not part of initial sync or if they change
+        ShopInfoUpdated = 200
     }
-
-    // ClientEscadreState is no longer a separate class. Its fields will be properties on EscadreProxy.ClientProxy
-    // public class ClientEscadreState { ... } // REMOVED
 
     public static class EscadreProxy
     {
-        public class ServerProxy : BaseServerProxy<Escadre> // Inherit from BaseServerProxy
+        public class ServerProxy : BaseServerProxy<Escadre> 
         {
-            // private readonly Level _level; // From Escadre model, for shop access. Escadre itself has _level.
-
             public ServerProxy(Escadre entity, IServerNetworkLayer networkLayer)
                 : base(entity, networkLayer)
             {
-                // _level = entity._level; // Access level via the entity
             }
 
             protected override float CalculateChecksum()
             {
-                int baseHash = base.CalculateChecksum().GetHashCode(); // Pos, Rot from BaseServerProxy
+                // Position is now dynamic (average of ships), so it changes frequently.
+                // Rotation is also dynamic.
+                // Nickname, Resources, and Formation structure are the primary state items for checksum
+                // beyond the base (which includes Pos/Rot).
+                int baseHash = base.CalculateChecksum().GetHashCode(); // Includes Pos, Rot
                 int formationHash = 0;
                 foreach(var slot in _entity.CurrentFormation.Slots)
                 {
                     formationHash = HashCode.Combine(formationHash, slot.ShipEntityId, slot.RelativeOffset);
                 }
-                // Shop designs don't typically change per-escadre or frequently, so not ideal for checksum.
-                // They are better as initial state or a separate global message/event.
                 return HashCode.Combine(baseHash, _entity.Nickname, _entity.Resources, formationHash);
             }
 
             public override void SerializeSpecificInitialState(BinaryWriter writer)
             {
-                // BaseServerProxy handles common Entity state like Position, Rotation via its CreateEntity flow.
-                // We serialize Escadre-specific state here.
-                writer.Write(_entity.OwnerClientId); // Important for client to identify its own escadre
+                writer.Write(_entity.OwnerClientId); 
                 writer.Write(_entity.Nickname ?? string.Empty);
                 writer.Write(_entity.Resources);
 
@@ -68,7 +53,6 @@ namespace Core.Network.Proxies
                     SerializationUtils.WriteVector2(writer, slot.RelativeOffset);
                 }
 
-                // Include Shop Designs in initial state for now
                 var designs = _entity.Level.GameShop.AvailableShipDesigns;
                 writer.Write(designs.Count);
                 foreach (var design in designs)
@@ -82,9 +66,8 @@ namespace Core.Network.Proxies
 
             protected override void SerializeSpecificCorrectionState(BinaryWriter writer)
             {
-                // BaseServerProxy handles common Entity state like Position, Rotation.
-                // We serialize Escadre-specific state here.
-                writer.Write(_entity.OwnerClientId); // Should not change, but send for consistency
+                // Position and Rotation are handled by BaseServerProxy.SerializeCorrectionState
+                writer.Write(_entity.OwnerClientId); 
                 writer.Write(_entity.Nickname ?? string.Empty);
                 writer.Write(_entity.Resources);
 
@@ -94,17 +77,15 @@ namespace Core.Network.Proxies
                     writer.Write(slot.ShipEntityId.HasValue ? slot.ShipEntityId.Value : -1);
                     SerializationUtils.WriteVector2(writer, slot.RelativeOffset);
                 }
-                // Shop designs are not typically part of correction state unless they changed globally
-                // and we decide to push them this way. For now, assume they are initial-only or via specific event.
             }
             
             protected override void StartReplicatingInternal()
             {
-                base.StartReplicatingInternal(); // Handles base Entity events if any
-                // Subscribe to Escadre-specific model events to trigger state updates/events
+                base.StartReplicatingInternal(); 
                 _entity.OnResourcesChanged += HandleModelResourcesChanged;
                 _entity.OnFormationChanged += HandleModelFormationChanged;
-                // If Nickname could change, subscribe to an OnNicknameChanged event.
+                // Assuming Nickname doesn't change or if it does, it would also trigger checksum change.
+                // If Nickname has its own event: _entity.OnNicknameChanged += HandleModelNicknameChanged;
                 Logger.Log($"[EscadreProxy.Server EntityId:{EntityId}] Subscribed to Escadre model events.");
             }
 
@@ -113,26 +94,21 @@ namespace Core.Network.Proxies
                 base.StopReplicatingInternal();
                 _entity.OnResourcesChanged -= HandleModelResourcesChanged;
                 _entity.OnFormationChanged -= HandleModelFormationChanged;
+                // If Nickname has its own event: _entity.OnNicknameChanged -= HandleModelNicknameChanged;
                 Logger.Log($"[EscadreProxy.Server EntityId:{EntityId}] Unsubscribed from Escadre model events.");
             }
 
             private void HandleModelResourcesChanged(int newAmount)
             {
-                // When resources change, the checksum will likely change.
-                // The standard _ClientSyncState mechanism will trigger an UpdateState if client's view is stale.
-                // No specific event needed if checksum approach is reliable for this.
-                // For immediate push, we could send an event, but let's rely on sync for now.
-                 Logger.Log($"[EscadreProxy.Server EntityId:{EntityId}] Resources changed. Checksum will reflect this.");
+                 Logger.Log($"[EscadreProxy.Server EntityId:{EntityId}] Resources changed. Checksum will reflect this for next client sync.");
             }
 
             private void HandleModelFormationChanged(Formation formation)
             {
-                // Similar to resources, checksum will change.
-                 Logger.Log($"[EscadreProxy.Server EntityId:{EntityId}] Formation changed. Checksum will reflect this.");
+                 Logger.Log($"[EscadreProxy.Server EntityId:{EntityId}] Formation changed. Checksum will reflect this for next client sync.");
             }
             
-            // Example: If shop designs change globally, could send a specific event
-            public void SendShopDesignsUpdate() // Call this if GameShop.AvailableShipDesigns changes
+            public void SendShopDesignsUpdate() 
             {
                  var designs = _entity.Level.GameShop.AvailableShipDesigns;
                  Logger.Log($"[EscadreProxy.Server {EntityId}] Sending ShopInfoUpdated event. Count: {designs.Count}");
@@ -150,18 +126,16 @@ namespace Core.Network.Proxies
             }
         }
         
-        public class ClientProxy : BaseClientProxy // Inherit from BaseClientProxy
+        public class ClientProxy : BaseClientProxy 
         {
             public override Entity.EntityTypeEnum EntityType => Entity.EntityTypeEnum.Escadre;
 
-            // Properties that were in ClientEscadreState
             public int OwnerClientId { get; private set; }
             public string Nickname { get; private set; }
             public int Resources { get; private set; }
             public List<FormationSlot> FormationSlots { get; } = new List<FormationSlot>();
             public List<ShipDesign> AvailableShopDesigns { get; } = new List<ShipDesign>();
 
-            // Events for UI to subscribe to
             public event Action OnNicknameChanged;
             public event Action OnResourcesChanged;
             public event Action OnFormationChanged;
@@ -173,7 +147,7 @@ namespace Core.Network.Proxies
 
             protected override void DeserializeSpecificInitialState(BinaryReader reader)
             {
-                // BaseClientProxy handles Position, Rotation
+                // BaseClientProxy.Initialize handles Position, Rotation from the CreateEntity message
                 OwnerClientId = reader.ReadInt32();
                 Nickname = reader.ReadString();
                 Resources = reader.ReadInt32();
@@ -199,39 +173,46 @@ namespace Core.Network.Proxies
                 }
                 
                 Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] Initialized. Owner:{OwnerClientId}, Nick:{Nickname}, Res:{Resources}, Slots:{FormationSlots.Count}, ShopDesigns:{AvailableShopDesigns.Count}");
-                InvokeAllChangedEvents(); // Invoke events after initial state is set
+                InvokeAllChangedEvents(); 
             }
 
             protected override void DeserializeSpecificState(BinaryReader reader)
             {
-                // BaseClientProxy handles Position, Rotation
-                var oldOwner = OwnerClientId; // Should not change, but read for consistency
+                // BaseClientProxy.DeserializeAndUpdateState handles Position, Rotation updates from UpdateState message
+                var oldOwner = OwnerClientId; 
                 var oldNickname = Nickname;
                 var oldResources = Resources;
-                // For formation, compare collections if complex, or just signal change.
-                // For simplicity, we'll signal change if counts differ or just always signal.
-
+                
                 OwnerClientId = reader.ReadInt32();
                 Nickname = reader.ReadString();
                 Resources = reader.ReadInt32();
 
                 int formationCount = reader.ReadInt32();
-                FormationSlots.Clear(); // Rebuild formation list
+                bool formationStructureChanged = formationCount != FormationSlots.Count; // Basic check
+                var tempNewSlots = new List<FormationSlot>();
                 for (int i = 0; i < formationCount; i++)
                 {
                     int shipId = reader.ReadInt32();
                     Vector2 offset = SerializationUtils.ReadVector2(reader);
-                    FormationSlots.Add(new FormationSlot(offset, shipId == -1 ? (int?)null : shipId ));
+                    tempNewSlots.Add(new FormationSlot(offset, shipId == -1 ? (int?)null : shipId ));
+                    if (!formationStructureChanged && i < FormationSlots.Count &&
+                        (FormationSlots[i].ShipEntityId != tempNewSlots[i].ShipEntityId || FormationSlots[i].RelativeOffset != tempNewSlots[i].RelativeOffset))
+                    {
+                        formationStructureChanged = true;
+                    }
                 }
-                // Shop designs usually not in correction unless explicitly sent.
-                // If they were here, deserialize and fire OnShopDesignsChanged.
+                if (formationStructureChanged)
+                {
+                    FormationSlots.Clear();
+                    FormationSlots.AddRange(tempNewSlots);
+                }
 
                 Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] State Updated. Owner:{OwnerClientId}, Nick:{Nickname}, Res:{Resources}, Slots:{FormationSlots.Count}");
 
                 if(OwnerClientId != oldOwner) Logger.LogWarning($"[EscadreProxy.Client EntityId:{EntityId}] OwnerClientId changed from {oldOwner} to {OwnerClientId}, this is unusual.");
                 if(Nickname != oldNickname) OnNicknameChanged?.Invoke();
                 if(Resources != oldResources) OnResourcesChanged?.Invoke();
-                OnFormationChanged?.Invoke(); // Always signal formation change on UpdateState for simplicity
+                if(formationStructureChanged) OnFormationChanged?.Invoke(); 
             }
 
             protected override void HandleSpecificEvent(byte specificEventType, BinaryReader reader)
@@ -255,7 +236,6 @@ namespace Core.Network.Proxies
                             Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] Processed ShopInfoUpdated event. Count: {AvailableShopDesigns.Count}");
                             OnShopDesignsChanged?.Invoke();
                             break;
-                        // Handle other EscadreEventType cases if defined (e.g., for fine-grained resource/formation updates)
                         default:
                             Logger.LogWarning($"[EscadreProxy.Client EntityId:{EntityId}] Unhandled EscadreEventType: {eventType}");
                             break;
@@ -269,9 +249,7 @@ namespace Core.Network.Proxies
             
             protected override void InvokeSpecificStateChangedEvents()
             {
-                // This is called after DeserializeSpecificState.
-                // Events are already invoked within DeserializeSpecificState based on changes.
-                // This method can be left empty or used if there's a general "StateChanged" event.
+                // Events are invoked within DeserializeSpecificState based on actual changes.
             }
 
             private void InvokeAllChangedEvents()
@@ -284,11 +262,66 @@ namespace Core.Network.Proxies
             
             protected override void CleanupEvents()
             {
-                base.CleanupEvents(); // Cleans up PositionChanged, RotationChanged etc.
+                base.CleanupEvents(); 
                 OnNicknameChanged = null;
                 OnResourcesChanged = null;
                 OnFormationChanged = null;
                 OnShopDesignsChanged = null;
+            }
+
+            public override void Update(float deltaTime)
+            {
+                // BaseClientProxy.Update does not exist or does nothing by default.
+                // This proxy now calculates its position based on its visible ships.
+
+                if (OwningClientLevel == null) return;
+
+                Vector3 sumPositions = Vector3.Zero;
+                int visibleShipCount = 0;
+                Quaternion averageRotationAccumulator = Quaternion.Identity; // For averaging rotation, simple approach
+                bool firstShip = true;
+
+                foreach (var proxy in OwningClientLevel.ActiveProxies.Values)
+                {
+                    if (proxy is ShipProxy.ClientProxy shipProxy && shipProxy.OwningEscadreClientId == this.OwnerClientId)
+                    {
+                        sumPositions += shipProxy.Position;
+                        visibleShipCount++;
+                        if (firstShip)
+                        {
+                            averageRotationAccumulator = shipProxy.Rotation;
+                            firstShip = false;
+                        }
+                        else
+                        {
+                            // Simplistic rotation averaging: Slerp towards the current ship's rotation.
+                            // A more robust method might average quaternion components or use a more sophisticated algorithm.
+                            averageRotationAccumulator = Quaternion.Slerp(averageRotationAccumulator, shipProxy.Rotation, 1.0f / visibleShipCount);
+                        }
+                    }
+                }
+
+                Vector3 newSimulatedPosition;
+                Quaternion newSimulatedRotation;
+
+                if (visibleShipCount > 0)
+                {
+                    newSimulatedPosition = sumPositions / visibleShipCount;
+                    newSimulatedRotation = averageRotationAccumulator.Normalized; // Ensure it's normalized
+                }
+                else
+                {
+                    // If no ships are visible, keep the last known server position,
+                    // or an interpolated position if it was moving.
+                    // For simplicity, we'll just hold the last known position.
+                    // The _simulatedPosition from BaseClientProxy is already the last server update or interpolated.
+                    newSimulatedPosition = _simulatedPosition; 
+                    newSimulatedRotation = _simulatedRotation;
+                }
+                
+                // Update the base class's simulated position and rotation
+                // This will trigger PositionChanged/RotationChanged events if they differ.
+                SetSimulatedPositionAndRotation(newSimulatedPosition, newSimulatedRotation);
             }
         }
     }
