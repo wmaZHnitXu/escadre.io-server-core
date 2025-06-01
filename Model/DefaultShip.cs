@@ -50,7 +50,7 @@ namespace Core.Model
                 ownerShip: this,
                 localPositionOffset: new Vector3(-0.3f, 0.1f, 0.7f),
                 localRotationOffset: Quaternion.Identity,
-                attackRange: 18f,
+                attackRange: 36f,
                 attackDamage: 5f,
                 attackCooldown: 2.0f
             );
@@ -61,7 +61,7 @@ namespace Core.Model
                 ownerShip: this,
                 localPositionOffset: new Vector3(0.3f, 0.1f, 0.7f),
                 localRotationOffset: Quaternion.Identity,
-                attackRange: 18f,
+                attackRange: 36f,
                 attackDamage: 5f,
                 attackCooldown: 2.0f
             );

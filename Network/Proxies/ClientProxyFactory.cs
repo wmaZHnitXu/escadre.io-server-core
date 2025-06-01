@@ -26,9 +26,13 @@ namespace Core.Network.Proxies
                 case Entity.EntityTypeEnum.Escadre: 
                     proxy = new EscadreProxy.ClientProxy(entityId, clientLevel);
                     break;
-                case Entity.EntityTypeEnum.ResourceBox: // Added
+                case Entity.EntityTypeEnum.ResourceBox: 
                     proxy = new CollectableFloatingEntityProxy.ClientProxy(entityId, entityType, clientLevel);
                     break;
+                case Entity.EntityTypeEnum.Bullet: // Added
+                    proxy = new ProjectileProxy.ClientProxy(entityId, entityType, clientLevel);
+                    break;
+
                 // DefaultCannon is an AttachedEntity, client-side representation would be part of the Ship's presentation.
                 // It typically doesn't have its own standalone proxy unless it's a fully independent entity.
                 default:

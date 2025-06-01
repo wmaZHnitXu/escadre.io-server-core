@@ -23,8 +23,12 @@ namespace Core.Network.Proxies
                 case Entity.EntityTypeEnum.Escadre: 
                     return new EscadreProxy.ServerProxy(entity as Escadre, networkLayer);
 
-                case Entity.EntityTypeEnum.ResourceBox: // Added
+                case Entity.EntityTypeEnum.ResourceBox: 
                     return new CollectableFloatingEntityProxy.ServerProxy<ResourceBox>(entity as ResourceBox, networkLayer);
+
+                case Entity.EntityTypeEnum.Bullet: // Added
+                    return new ProjectileProxy.ServerProxy(entity as Projectile, networkLayer);
+
 
                 // Removed DefaultCannon from here as it's an AttachedEntity and typically not directly replicated
                 // unless it needs its own independent PVS updates, which is unusual for a cannon.
@@ -50,6 +54,11 @@ namespace Core.Network.Proxies
                     if (entity is CollectableFloatingEntity cfe) {
                         Logger.LogWarning($"[ServerProxyFactory] EntityType {entity.EntityType} is CollectableFloatingEntity. Using generic CollectableFloatingEntityProxy.ServerProxy.");
                         return new CollectableFloatingEntityProxy.ServerProxy<CollectableFloatingEntity>(cfe, networkLayer);
+                    }
+                    // Fallback for other Projectile types if not Bullet
+                    if (entity is Projectile proj) {
+                        Logger.LogWarning($"[ServerProxyFactory] EntityType {entity.EntityType} is Projectile. Using generic ProjectileProxy.ServerProxy.");
+                        return new ProjectileProxy.ServerProxy(proj, networkLayer);
                     }
 
                     throw new ArgumentException($"No ServerProxy registered or suitable base proxy found for EntityType: {entity.EntityType}");

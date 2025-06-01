@@ -13,7 +13,8 @@ namespace Core.Model
             Escadre,
             DefaultShip,
             DefaultCannon,
-            ResourceBox
+            ResourceBox,
+            Bullet
         }
         public abstract EntityTypeEnum EntityType { get; }
         public int Id { get; private set; }

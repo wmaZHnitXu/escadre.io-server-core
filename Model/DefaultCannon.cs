@@ -15,6 +15,7 @@ namespace Core.Model
         public float AttackCooldown { get; protected set; }
         protected float _currentAttackCooldownTimer;
         public Vector3 ProjectileSpawnOffset { get; protected set; }
+        public float ProjectileSpeed { get; protected set; } = 50f; // Speed of the bullet
 
         // Aiming tolerance: dot product threshold (e.g., cos(5 degrees) = 0.996)
         private const float AIM_ACCURACY_DOT_THRESHOLD = 0.996f; 
@@ -82,20 +83,35 @@ namespace Core.Model
 
             // --- Perform the shot --- 
             Vector3 projectileSpawnWorldPosition = this.Position + (this.Rotation * ProjectileSpawnOffset);
+            Vector3 projectileVelocity = cannonForward * ProjectileSpeed;
 
-            DamageInfo damageInfo = new DamageInfo(
+            DamageInfo damageInfoPayload = new DamageInfo(
                 AttackDamage,
-                DamageType.Kinetic, // Default damage type
-                projectileSpawnWorldPosition, // Origin of damage for effects/sound
-                cannonForward, // Direction of the attack
-                this.Id, // Source is the cannon entity itself
-                this.Owner.OwningEscadreClientId // Player/client source
+                DamageType.Kinetic, 
+                projectileSpawnWorldPosition, // This will be overwritten by bullet if it hits, but good for origin
+                cannonForward, 
+                this.Id, 
+                this.Owner.OwningEscadreClientId 
             );
 
-            Logger.Log($"[DefaultCannon {Id} on Ship {Owner.Id}] Firing at {target.GetType().Name} {target.Id}. Damage: {AttackDamage}");
-            destructibleTarget.ApplyDamage(damageInfo);
+            // Create and launch the bullet
+            Bullet bullet = new Bullet(
+                _level,
+                this.Id,                        // Owner of the projectile is the cannon
+                this.Owner.OwningEscadreClientId, // Client owner from the ship
+                projectileSpawnWorldPosition,
+                projectileVelocity,
+                damageInfoPayload,
+                this.AttackRange / ProjectileSpeed + 0.5f, // Max lifetime based on range and speed + buffer
+                _level.CurrentTime                  // Server time of spawn
+            );
+            // The bullet's constructor calls _level.AddEntity(bullet);
+
+            Logger.Log($"[DefaultCannon {Id} on Ship {Owner.Id}] Fired Bullet {bullet.Id} at {target.GetType().Name} {target.Id}.");
+            // Damage is applied by the bullet on impact, not directly by the cannon here.
+            // destructibleTarget.ApplyDamage(damageInfo); // This was removed
 
             _currentAttackCooldownTimer = AttackCooldown;
         }
     }
-} 
+}
