@@ -25,7 +25,11 @@ namespace Core.Network.Proxies
 
             protected override float CalculateChecksum() {
                 int baseHash = base.CalculateChecksum().GetHashCode();
-                return HashCode.Combine(baseHash, _entity.CurrentSpeed.GetHashCode(), _entity.MaxSpeed.GetHashCode());
+                return HashCode.Combine(baseHash, 
+                                        _entity.CurrentSpeed.GetHashCode(), 
+                                        _entity.FormationThreshold.GetHashCode(),
+                                        _entity.AccelerationRate.GetHashCode(),
+                                        _entity.DecelerationRate.GetHashCode());
             }
             public override void SerializeSpecificInitialState(BinaryWriter writer) {
                 base.SerializeSpecificInitialState(writer);
@@ -33,12 +37,22 @@ namespace Core.Network.Proxies
                 writer.Write(_entity.CurrentSpeed);
                 writer.Write(_entity.MaxSpeed); 
                 writer.Write(_entity.TurnRate); 
+                writer.Write(_entity.SlowingDistance);
+                writer.Write(_entity.StoppingDistance);
+                writer.Write(_entity.FormationThreshold);
+                writer.Write(_entity.AccelerationRate);
+                writer.Write(_entity.DecelerationRate);
             }
             protected override void SerializeSpecificCorrectionState(BinaryWriter writer) {
                 base.SerializeSpecificCorrectionState(writer);
                 writer.Write(_entity.CurrentSpeed); 
                 writer.Write(_entity.MaxSpeed); 
                 writer.Write(_entity.TurnRate); 
+                writer.Write(_entity.SlowingDistance);
+                writer.Write(_entity.StoppingDistance);
+                writer.Write(_entity.FormationThreshold);
+                writer.Write(_entity.AccelerationRate);
+                writer.Write(_entity.DecelerationRate);
             }
 
             protected override void StartReplicatingInternal() {
@@ -79,27 +93,27 @@ namespace Core.Network.Proxies
 
             public float MaxSpeed { get; private set; } 
             public float TurnRate { get; private set; }
+            public float SlowingDistance { get; private set; }
+            public float StoppingDistance { get; private set; }
+            public float FormationThreshold { get; private set; } // Not directly used by client sim, but available
+            public float AccelerationRate { get; private set; }
+            public float DecelerationRate { get; private set; }
             public event Action StatsChanged; 
 
-            private Vector2? _currentMovementTarget;
+            private Vector2? _currentMovementTarget; 
             private bool _isMovingClientSide = false;
 
-            // Define floating points for client-side ship visuals
-            // These should match the conceptual points of the DefaultShip model on the server.
             private readonly List<Vector3> _clientShipFloatingPoints = new List<Vector3>
             {
-                new Vector3(0f, 0f, 2.0f),   // Bow
-                new Vector3(0f, 0f, -2.0f),  // Stern
-                new Vector3(0.5f, 0f, 0f),   // Starboard mid
-                new Vector3(-0.5f, 0f, 0f)   // Port mid
+                new Vector3(0f, 0f, 2.0f),   
+                new Vector3(0f, 0f, -2.0f),  
+                new Vector3(0.5f, 0f, 0f),   
+                new Vector3(-0.5f, 0f, 0f)   
             };
-            // _clientFloatingBehavior is inherited from BaseClientProxy (IFloatingBehavior _clientFloatingBehavior)
-            // It will be initialized in Update() if ocean is available.
 
             public ClientProxy(int entityId, Entity.EntityTypeEnum concreteType, ClientLevel clientLevel)
                 : base(entityId, concreteType, clientLevel)
             {
-                // _clientFloatingBehavior (from BaseClientProxy) will be lazy-initialized in Update()
             }
 
             protected override void DeserializeSpecificInitialState(BinaryReader reader) {
@@ -108,6 +122,11 @@ namespace Core.Network.Proxies
                 _clientSimulatedSpeed = reader.ReadSingle(); 
                 MaxSpeed = reader.ReadSingle(); 
                 TurnRate = reader.ReadSingle();
+                SlowingDistance = reader.ReadSingle();
+                StoppingDistance = reader.ReadSingle();
+                FormationThreshold = reader.ReadSingle();
+                AccelerationRate = reader.ReadSingle();
+                DecelerationRate = reader.ReadSingle();
                 
                 CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed); 
                 StatsChanged?.Invoke(); 
@@ -116,24 +135,36 @@ namespace Core.Network.Proxies
             protected override void DeserializeSpecificState(BinaryReader reader) { 
                 base.DeserializeSpecificState(reader); 
                 
-                float serverAuthoritativeSpeed = reader.ReadSingle(); // This was from an older version, CurrentSpeed is now part of correction state
-                                                                    // but not directly used here for setting _clientSimulatedSpeed, as it's simulated.
-
                 var oldMaxSpeed = MaxSpeed;
                 var oldTurnRate = TurnRate; 
+                var oldSlowingDist = SlowingDistance;
+                var oldStoppingDist = StoppingDistance;
+                var oldFormationThresh = FormationThreshold;
+                var oldAccel = AccelerationRate;
+                var oldDecel = DecelerationRate;
+
+                float serverAuthoritativeSpeed = reader.ReadSingle();
+                 if (Math.Abs(_clientSimulatedSpeed - serverAuthoritativeSpeed) > 0.01f && !_isMovingClientSide)
+                 {
+                     _clientSimulatedSpeed = serverAuthoritativeSpeed;
+                 }
+
                 MaxSpeed = reader.ReadSingle(); 
                 TurnRate = reader.ReadSingle();
+                SlowingDistance = reader.ReadSingle();
+                StoppingDistance = reader.ReadSingle();
+                FormationThreshold = reader.ReadSingle();
+                AccelerationRate = reader.ReadSingle();
+                DecelerationRate = reader.ReadSingle();
                 
-                // If CurrentSpeed was part of the UpdateState payload and we wanted to snap to it:
-                // if (Math.Abs(_clientSimulatedSpeed - serverAuthoritativeSpeed) > float.Epsilon)
-                // {
-                //     _clientSimulatedSpeed = serverAuthoritativeSpeed;
-                //     CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
-                // }
-                // For now, CurrentSpeed is part of specific correction state, but client mostly simulates its own speed.
-                // The server's CurrentSpeed might be useful if client needs to exactly match server for some reason beyond position/rotation updates.
-
-                if (Math.Abs(MaxSpeed - oldMaxSpeed) > float.Epsilon || Math.Abs(TurnRate - oldTurnRate) > float.Epsilon) {
+                if (Math.Abs(MaxSpeed - oldMaxSpeed) > float.Epsilon || 
+                    Math.Abs(TurnRate - oldTurnRate) > float.Epsilon ||
+                    Math.Abs(SlowingDistance - oldSlowingDist) > float.Epsilon ||
+                    Math.Abs(StoppingDistance - oldStoppingDist) > float.Epsilon ||
+                    Math.Abs(FormationThreshold - oldFormationThresh) > float.Epsilon ||
+                    Math.Abs(AccelerationRate - oldAccel) > float.Epsilon ||
+                    Math.Abs(DecelerationRate - oldDecel) > float.Epsilon) 
+                {
                     StatsChanged?.Invoke();
                 }
             }
@@ -150,15 +181,10 @@ namespace Core.Network.Proxies
                             break;
                         default:
                             Logger.LogWarning($"[ShipProxy.Client {EntityId}] Received unhandled ShipEventType: {eventType}");
-                            // If DestructibleEntityProxy's base.HandleSpecificEvent is needed for some reason, call it.
-                            // But BaseClientProxy.HandleSpecificEvent is abstract.
-                            // DestructibleEntityProxy itself might handle some events.
-                            // For now, if it's not a ShipEventType, it's an error or unhandled for this proxy.
                             break;
                     }
                 }
                 else {
-                    // If the event is not a ShipEventType, it might be for DestructibleEntityProxy.
                     base.HandleSpecificEvent(specificEventType, reader); 
                 }
             }
@@ -166,7 +192,7 @@ namespace Core.Network.Proxies
             private void HandleSetMovementTargetEventPayload(BinaryReader reader)
             {
                 bool hasTarget = reader.ReadBoolean();
-                _currentMovementTarget = hasTarget ? SerializationUtils.ReadVector2(reader) : (Vector2?)null;
+                Vector2? serverCommandedTarget = hasTarget ? SerializationUtils.ReadVector2(reader) : (Vector2?)null;
                 
                 Vector3 serverPosAtCommand = SerializationUtils.ReadVector3(reader);
                 Quaternion serverRotAtCommand = SerializationUtils.ReadQuaternion(reader);
@@ -174,111 +200,156 @@ namespace Core.Network.Proxies
                 float serverTimeOfCommand = reader.ReadSingle(); 
 
                 float clientTimeNow = OwningClientLevel.CurrentTime;
-                float catchUpDeltaTime = clientTimeNow - serverTimeOfCommand;
+                float catchUpDeltaTime = Math.Max(0, clientTimeNow - serverTimeOfCommand);
 
                 Vector3 predictedPos = serverPosAtCommand;
                 Quaternion predictedRot = serverRotAtCommand;
                 float predictedSpeed = serverSpeedAtCommand;
                 bool stillMovingAfterCatchUp = hasTarget;
 
-                if (catchUpDeltaTime > 0.001f && _currentMovementTarget.HasValue) 
+                if (catchUpDeltaTime > 0.001f && serverCommandedTarget.HasValue) 
                 {
-                    // SimulatePlanarMovementStep expects the current Y to be passed for preservation
-                    // and only modifies XZ and Yaw.
                     var catchUpResult = SimulatePlanarMovementStep(
-                        serverPosAtCommand, // serverPosAtCommand already includes ocean-affected Y from server
-                        serverRotAtCommand, // serverRotAtCommand includes ocean-affected pitch/roll from server
-                        serverSpeedAtCommand,
-                        _currentMovementTarget, MaxSpeed, TurnRate, catchUpDeltaTime, true 
+                        serverPosAtCommand, serverRotAtCommand, serverSpeedAtCommand,
+                        serverCommandedTarget, catchUpDeltaTime, true 
                     );
                     predictedPos = catchUpResult.newPos; 
                     predictedRot = catchUpResult.newRot; 
                     predictedSpeed = catchUpResult.newSpeed;
                     stillMovingAfterCatchUp = catchUpResult.stillMoving;
                 }
+                
+                _currentMovementTarget = serverCommandedTarget; 
+                _isMovingClientSide = stillMovingAfterCatchUp && serverCommandedTarget.HasValue;
 
-                // SetSimulatedPositionAndRotation will update _simulatedPosition and _simulatedRotation
-                // These values will then be used as the input for the next frame's Update() which includes floating.
+                if (!_isMovingClientSide && _currentMovementTarget.HasValue) 
+                {
+                    float distSq = (_currentMovementTarget.Value - new Vector2(predictedPos.X, predictedPos.Z)).SqrMagnitude;
+                    // Use a slightly more generous stopping distance check for clearing the target on client
+                    if(distSq < (StoppingDistance + 0.3f) * (StoppingDistance + 0.3f)) 
+                    {
+                         _currentMovementTarget = null;
+                    }
+                }
+
+
                 SetSimulatedPositionAndRotation(predictedPos, predictedRot);
-                if (Math.Abs(_clientSimulatedSpeed - predictedSpeed) > float.Epsilon)
+                if (Math.Abs(_clientSimulatedSpeed - predictedSpeed) > 0.01f)
                 {
                     _clientSimulatedSpeed = predictedSpeed;
                     CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
                 }
-                
-                _isMovingClientSide = stillMovingAfterCatchUp && hasTarget; 
-                if (!_isMovingClientSide) _currentMovementTarget = null;
             }
             
-            // Simulates XZ movement and Yaw only. Preserves input Y.
             private (Vector3 newPos, Quaternion newRot, float newSpeed, bool stillMoving) SimulatePlanarMovementStep(
                 Vector3 currentFullPosition, Quaternion currentFullRotation, float currentSpeedParam,
-                Vector2? target, float currentMaxSpeed, float currentTurnRate, float deltaTime, bool hasExternalMoveOrder)
+                Vector2? targetSlotPos, float deltaTime, bool hasExternalMoveOrder)
             {
-                // --- Yaw Component ---
-                // Extract current planar yaw from the full rotation (which might include ocean pitch/roll)
-                Vector3 currentWorldForwardFull = currentFullRotation * Vector3.Forward;
-                Vector3 currentPlanarForwardVec = new Vector3(currentWorldForwardFull.X, 0.0f, currentWorldForwardFull.Z).NormalizedSafe(Vector3.Forward);
-                Quaternion currentPureYawOrientation = Quaternion.LookRotation(currentPlanarForwardVec, Vector3.Up);
-                Quaternion nextPureYaw = currentPureYawOrientation;
+                float targetSpeedThisFrame;
+                bool stillNeedsToMove = hasExternalMoveOrder && targetSlotPos.HasValue;
 
-                // --- XZ Position Component ---
-                Vector3 nextPosWithPreservedY = currentFullPosition; // Start with current full pos to preserve Y
-
-                float nextSpeed = currentSpeedParam;
-                bool stillNeedsToMove = hasExternalMoveOrder;
-
-                if (!hasExternalMoveOrder || !target.HasValue)
+                if (!stillNeedsToMove)
                 {
-                    if (nextSpeed > 0) nextSpeed = Math.Max(0, nextSpeed - (currentMaxSpeed * 2f * deltaTime)); 
-                    else nextSpeed = 0f;
-                    stillNeedsToMove = false;
+                    targetSpeedThisFrame = 0f;
                 }
                 else
                 {
                     Vector2 currentPos2D = new Vector2(currentFullPosition.X, currentFullPosition.Z);
-                    Vector2 targetPos2D = target.Value;
+                    Vector2 targetPos2D = targetSlotPos.Value;
                     Vector2 toTarget = targetPos2D - currentPos2D;
-                    float distanceToTargetSq = toTarget.SqrMagnitude;
+                    float distanceToTarget = toTarget.Magnitude;
                     
-                    float stoppingDistance = currentMaxSpeed * deltaTime * 0.75f; 
-                    stoppingDistance = Math.Max(0.01f, stoppingDistance); 
-                    float stoppingDistanceSq = stoppingDistance * stoppingDistance;
+                    float finalDecelRate = DecelerationRate; 
+                    if (finalDecelRate < Vector3.Epsilon) finalDecelRate = 1f;
+                    float predictiveStopDist = (currentSpeedParam * currentSpeedParam) / (2f * finalDecelRate);
+                    float actualStoppingThreshold = Math.Max(predictiveStopDist, StoppingDistance) + 0.1f; 
 
-                    if (distanceToTargetSq < stoppingDistanceSq)
+
+                    if (distanceToTarget < actualStoppingThreshold)
                     {
-                        nextPosWithPreservedY = new Vector3(targetPos2D.X, currentFullPosition.Y, targetPos2D.Y); 
-                        nextSpeed = 0f;
-                        stillNeedsToMove = false;
+                        targetSpeedThisFrame = 0f;
+                    }
+                    else if (distanceToTarget < SlowingDistance)
+                    {
+                        targetSpeedThisFrame = MaxSpeed * Math.Clamp(distanceToTarget / Math.Max(SlowingDistance,0.1f), 0.1f, 1.0f);
+                        targetSpeedThisFrame = Math.Max(0, targetSpeedThisFrame);
                     }
                     else
                     {
-                        if (nextSpeed < currentMaxSpeed) nextSpeed = Math.Min(currentMaxSpeed, nextSpeed + (currentMaxSpeed * 1.0f * deltaTime));
-                        else nextSpeed = currentMaxSpeed;
+                        targetSpeedThisFrame = MaxSpeed;
+                    }
+                    targetSpeedThisFrame = Math.Min(targetSpeedThisFrame, MaxSpeed); 
+                }
 
-                        Vector2 directionToTarget = toTarget.Normalized;
-                        Vector3 targetForwardPlanar = new Vector3(directionToTarget.X, 0, directionToTarget.Y);
+                float nextSpeed;
+                 if (targetSpeedThisFrame > currentSpeedParam)
+                {
+                    nextSpeed = MathUtils.MoveTowards(currentSpeedParam, targetSpeedThisFrame, AccelerationRate * deltaTime);
+                }
+                else
+                {
+                    nextSpeed = MathUtils.MoveTowards(currentSpeedParam, targetSpeedThisFrame, DecelerationRate * deltaTime);
+                }
 
-                        if (targetForwardPlanar.SqrMagnitude > Vector3.Epsilon)
+                if (nextSpeed < 0.01f)
+                {
+                    nextSpeed = 0f;
+                    if (!targetSlotPos.HasValue) {
+                        stillNeedsToMove = false;
+                    } else {
+                        Vector2 currentPos2D = new Vector2(currentFullPosition.X, currentFullPosition.Z);
+                        if((targetSlotPos.Value - currentPos2D).SqrMagnitude < (StoppingDistance + 0.3f) * (StoppingDistance + 0.3f))
                         {
-                            Quaternion desiredYawRotation = Quaternion.LookRotation(targetForwardPlanar, Vector3.Up);
-                            nextPureYaw = Quaternion.RotateTowards(currentPureYawOrientation, desiredYawRotation, currentTurnRate * deltaTime);
+                            stillNeedsToMove = false;
+                        } else {
+                            stillNeedsToMove = true; 
                         }
-                        Vector3 velocity = nextPureYaw * Vector3.Forward * nextSpeed * deltaTime;
+                    }
+                } else {
+                    stillNeedsToMove = targetSlotPos.HasValue; 
+                }
+
+
+                Quaternion finalCombinedRotation = currentFullRotation;
+                Vector3 nextPosWithPreservedY = currentFullPosition;
+
+                if (stillNeedsToMove || nextSpeed > 0.001f) 
+                {
+                    Vector3 previousForwardFull_client = currentFullRotation * Vector3.Forward;
+                    Vector3 previousForwardPlanar_client = new Vector3(previousForwardFull_client.X, 0f, previousForwardFull_client.Z).NormalizedSafe(Vector3.Forward);
+                    Quaternion currentPureYawOrientation_client = Quaternion.LookRotation(previousForwardPlanar_client, Vector3.Up);
+
+                    Quaternion desiredPureYawRotation_client = currentPureYawOrientation_client; 
+                    if (targetSlotPos.HasValue)
+                    {
+                        Vector2 currentPos2D_client_local = new Vector2(currentFullPosition.X, currentFullPosition.Z);
+                        Vector2 toTargetVec2D_client = targetSlotPos.Value - currentPos2D_client_local;
+                        if (toTargetVec2D_client.SqrMagnitude > 0.01f) 
+                        {
+                            Vector3 targetForwardPlanarVec_client = new Vector3(toTargetVec2D_client.X, 0f, toTargetVec2D_client.Y).Normalized;
+                            if (targetForwardPlanarVec_client.SqrMagnitude > Vector3.Epsilon)
+                            {
+                                desiredPureYawRotation_client = Quaternion.LookRotation(targetForwardPlanarVec_client, Vector3.Up);
+                            }
+                        }
+                    }
+
+                    Quaternion nextPureYaw_client = Quaternion.RotateTowards(currentPureYawOrientation_client, desiredPureYawRotation_client, TurnRate * deltaTime);
+                    Quaternion yawDeltaRotation_client = nextPureYaw_client * currentPureYawOrientation_client.Inverse; 
+                    finalCombinedRotation = (yawDeltaRotation_client * currentFullRotation).Normalized; 
+
+
+                    if (nextSpeed > 0f)
+                    {
+                        Vector3 movementPlanarForward = (nextPureYaw_client * Vector3.Forward); 
+                        Vector3 planarVelocityDelta = movementPlanarForward * nextSpeed * deltaTime;
                         nextPosWithPreservedY = new Vector3(
-                            currentFullPosition.X + velocity.X, 
-                            currentFullPosition.Y, // Preserve original Y
-                            currentFullPosition.Z + velocity.Z
+                            currentFullPosition.X + planarVelocityDelta.X,
+                            currentFullPosition.Y, 
+                            currentFullPosition.Z + planarVelocityDelta.Z
                         );
                     }
                 }
-                
-                // --- Combine Yaw with Original Pitch/Roll ---
-                // Calculate the change in pure yaw
-                Quaternion yawChange = nextPureYaw * currentPureYawOrientation.Inverse;
-                // Apply this yaw change to the original full rotation (that includes ocean effects)
-                Quaternion finalCombinedRotation = (yawChange * currentFullRotation).Normalized;
-
                 return (nextPosWithPreservedY, finalCombinedRotation, nextSpeed, stillNeedsToMove);
             }
 
@@ -287,67 +358,35 @@ namespace Core.Network.Proxies
             {
                 if (deltaTime <= 0f || _isDestroyed) return;
 
-                // Current simulated state before this frame's logic
                 Vector3 currentSimPos = _simulatedPosition;
                 Quaternion currentSimRot = _simulatedRotation; 
                 float currentSimSpeed = _clientSimulatedSpeed;
-                bool isCurrentlyMovingPlanar = _isMovingClientSide;
-
-                // 1. Simulate Planar (XZ) Movement and Yaw based on movement target
-                // This step updates XZ position and applies commanded Yaw while preserving existing Pitch/Roll.
-                if (!isCurrentlyMovingPlanar || !_currentMovementTarget.HasValue)
-                {
-                    if (currentSimSpeed > 0)
-                    {
-                        currentSimSpeed = Math.Max(0, currentSimSpeed - (MaxSpeed * 2f * deltaTime));
-                    }
-                    else { currentSimSpeed = 0f; }
-                    isCurrentlyMovingPlanar = false;
-                    // No change to currentSimPos.X/Z or currentSimRot's yaw component if not moving.
-                    // Y, Pitch, Roll will be handled by floating behavior next.
-                }
-                else 
-                {
-                    var planarSimResult = SimulatePlanarMovementStep(
-                        currentSimPos,      
-                        currentSimRot,      
-                        currentSimSpeed,    
-                        _currentMovementTarget, 
-                        MaxSpeed, 
-                        TurnRate, 
-                        deltaTime, 
-                        isCurrentlyMovingPlanar
-                    );
-
-                    currentSimPos = planarSimResult.newPos; // XZ updated, Y preserved from input
-                    currentSimRot = planarSimResult.newRot; // Yaw updated, Pitch/Roll preserved from input
-                    currentSimSpeed = planarSimResult.newSpeed;
-                    isCurrentlyMovingPlanar = planarSimResult.stillMoving;
-                }
                 
-                _isMovingClientSide = isCurrentlyMovingPlanar;
-                if (!_isMovingClientSide) {
-                     _currentMovementTarget = null; 
+                var planarSimResult = SimulatePlanarMovementStep(
+                    currentSimPos, currentSimRot, currentSimSpeed,
+                    _currentMovementTarget, deltaTime, _isMovingClientSide
+                );
+
+                currentSimPos = planarSimResult.newPos;
+                currentSimRot = planarSimResult.newRot;
+                currentSimSpeed = planarSimResult.newSpeed;
+                _isMovingClientSide = planarSimResult.stillMoving;
+
+                if (!_isMovingClientSide && _currentMovementTarget.HasValue) {
+                    float distSq = (_currentMovementTarget.Value - new Vector2(currentSimPos.X, currentSimPos.Z)).SqrMagnitude;
+                    if(distSq < (StoppingDistance + 0.3f) * (StoppingDistance + 0.3f)) 
+                    {
+                         _currentMovementTarget = null;
+                    }
                 }      
-
-                // At this point:
-                // currentSimPos has updated XZ from planar movement, and Y from previous frame's floating.
-                // currentSimRot has updated Yaw from planar movement, and Pitch/Roll from previous frame's floating.
-                // currentSimSpeed is updated.
-
-                // 2. Apply Floating Behavior 
-                // This will adjust Y, Pitch, and Roll based on the ocean, using the results from planar sim as input.
+                
                 if (OwningClientLevel.IsOceanInitialized)
                 {
-                    if (_clientFloatingBehavior == null) // Lazy initialization
+                    if (_clientFloatingBehavior == null) 
                     {
-                        // Ensure IOceanDataProvider is available
                         if (OwningClientLevel.OceanDataProvider != null)
                         {
                             _clientFloatingBehavior = new MultiPointFloatingBehavior(_clientShipFloatingPoints, OwningClientLevel.OceanDataProvider);
-                            // Configure floating parameters if needed (e.g., less aggressive than server for smoother visuals)
-                            // _clientFloatingBehavior.VerticalInterpolationSpeed = 1.5f; 
-                            // _clientFloatingBehavior.RotationalInterpolationSpeed = 40.0f;
                             Logger.Log($"[ShipProxy.Client {EntityId}] Initialized MultiPointFloatingBehavior.");
                         }
                         else
@@ -359,23 +398,17 @@ namespace Core.Network.Proxies
                     if (_clientFloatingBehavior != null)
                     {
                         _clientFloatingBehavior.ApplyFloating(
-                            currentSimPos, 
-                            currentSimRot, 
-                            OwningClientLevel.CurrentTime, 
-                            deltaTime, 
-                            out Vector3 finalPosWithFloat, 
-                            out Quaternion finalRotWithFloat
+                            currentSimPos, currentSimRot, OwningClientLevel.CurrentTime, deltaTime, 
+                            out Vector3 finalPosWithFloat, out Quaternion finalRotWithFloat
                         );
-                        
                         currentSimPos = finalPosWithFloat; 
                         currentSimRot = finalRotWithFloat; 
                     }
                 }
-                // If ocean is not initialized or behavior not set, currentSimPos and currentSimRot remain as after planar sim.
                 
                 SetSimulatedPositionAndRotation(currentSimPos, currentSimRot);
                 
-                if (Math.Abs(_clientSimulatedSpeed - currentSimSpeed) > float.Epsilon)
+                if (Math.Abs(_clientSimulatedSpeed - currentSimSpeed) > 0.01f)
                 {
                     _clientSimulatedSpeed = currentSimSpeed;
                     CurrentSpeedChanged?.Invoke(_clientSimulatedSpeed);
@@ -389,8 +422,7 @@ namespace Core.Network.Proxies
             }
             protected override void InvokeSpecificStateChangedEvents() { 
                 base.InvokeSpecificStateChangedEvents();
-                // If MaxSpeed or TurnRate had their own events, they'd be invoked here after deserialization.
-                // StatsChanged event already covers them.
+                StatsChanged?.Invoke(); 
             }
         }
     }

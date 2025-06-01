@@ -3,6 +3,7 @@ using Core.Primitives;
 using Core.Logging;
 using Core.Ocean;
 using System.Collections.Generic;
+using System; // For MathF
 
 namespace Core.Model
 {
@@ -17,9 +18,21 @@ namespace Core.Model
         public DefaultShip(Level level, Escadre ownerEscadre, Vector3 initialPosition)
             : base(level, ownerEscadre, initialPosition, 75f) 
         {
-            MaxSpeed = 4f;
-            TurnRate = 75f;
+            MaxSpeed = 4.0f;
+            TurnRate = 75f; // Degrees per second
             CollectableDetectionRange = 8.0f; 
+
+            // Initialize movement parameters from Ship base class
+            AccelerationRate = MaxSpeed / 2.0f; 
+            DecelerationRate = MaxSpeed / 1.0f; 
+
+            // StoppingDistance: distance needed to stop from MaxSpeed with full deceleration (DecelerationRate * 2f)
+            // d = v^2 / (2*a), where a = DecelerationRate * 2f
+            // So, d = MaxSpeed^2 / (4 * DecelerationRate).
+            // If DecelerationRate = MaxSpeed, then d = MaxSpeed / 4.
+            StoppingDistance = (MaxSpeed / 4.0f) + 0.1f; // Added small buffer
+            SlowingDistance = StoppingDistance * 3.0f; // Start slowing down much earlier
+            FormationThreshold = 2.5f;        
 
             var floatingPoints = new List<Vector3>
             {
@@ -38,10 +51,6 @@ namespace Core.Model
                 Logger.LogWarning($"[DefaultShip ID:{this.Id}] OceanDataProvider not available in Level. FloatingBehavior not initialized.");
             }
 
-            // Add Collider
-            // Approximate size: Width (X) ~1.5m, Height (Y) ~1.0m, Length (Z) ~4.5m
-            // Offset can be (0, 0.25f, 0) if pivot is at waterline and actual model base is lower.
-            // For simplicity, assuming pivot is at geometric center for collider offset.
             AddCollider(new BoxCollider(this, new Vector3(0, 0.25f, 0f), new Vector3(1.5f, 1.2f, 4.5f)));
 
 
@@ -77,13 +86,15 @@ namespace Core.Model
             MaxSpeed += 0.5f;
             TurnRate += 10f;
             CollectableDetectionRange += 1.0f; 
-            BoundingRadius2D += 0.2f; // Example: slightly larger visually/for coarse collision
+            BoundingRadius2D += 0.2f; 
 
-            // Potentially adjust collider size/offset if upgrade makes it visually larger
-            // For now, keeping collider same.
-            // Example: if (Colliders.FirstOrDefault() is BoxCollider box) { box.Size = new Vector3( ... ); }
+            AccelerationRate = MaxSpeed / 2.0f; 
+            DecelerationRate = MaxSpeed / 1.0f;
+            StoppingDistance = (MaxSpeed / 4.0f) + 0.1f; 
+            SlowingDistance = StoppingDistance * 3.0f;
 
             Logger.Log($"[DefaultShip {Id}] Upgraded! New Stats -> HP: {MaxHealth}, Spd: {MaxSpeed}, Turn: {TurnRate}, CollectRange: {CollectableDetectionRange}, BoundsR: {BoundingRadius2D}.");
+            Logger.Log($"[DefaultShip {Id}] Upgraded Movement -> SlowDist: {SlowingDistance}, StopDist: {StoppingDistance}, Accel: {AccelerationRate}");
         }
     }
 }

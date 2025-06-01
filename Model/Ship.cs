@@ -28,20 +28,33 @@ namespace Core.Model
         public float CollectableDetectionRange { get; protected set; } = 7.0f;
         private CollectableFloatingEntity _targetedCollectable = null; 
 
+        public float SlowingDistance { get; protected set; }
+        public float StoppingDistance { get; protected set; } 
+        public float FormationThreshold { get; protected set; } 
+        public float AccelerationRate { get; protected set; } 
+        public float DecelerationRate { get; protected set; } 
+
+
         protected Ship(Level level, Escadre ownerEscadre, Vector3 initialPosition, float maxHealth)
             : base(level, maxHealth)
         {
             OwningEscadre = ownerEscadre ?? throw new ArgumentNullException(nameof(ownerEscadre));
             OwningEscadreClientId = ownerEscadre.OwnerClientId;
             Position = initialPosition; 
-            Rotation = Quaternion.Identity;
+            Rotation = Quaternion.Identity; 
             IsMoving = false;
             CurrentSpeed = 0f;
+
+            SlowingDistance = 3.0f;
+            StoppingDistance = 0.5f; 
+            FormationThreshold = 2.0f; 
+            AccelerationRate = 2.0f; 
+            DecelerationRate = 4.0f; 
         }
 
         public override void Update(float delta)
         {
-            base.Update(delta); // Handles FloatingBehavior
+            base.Update(delta); 
 
             if (IsDead)
             {
@@ -63,7 +76,19 @@ namespace Core.Model
                            (targetWorldPosition.HasValue && _movementTargetPosition.Value != targetWorldPosition.Value);
 
             _movementTargetPosition = targetWorldPosition;
-            IsMoving = targetWorldPosition.HasValue; 
+            
+            if (targetWorldPosition.HasValue)
+            {
+                 // Check if the new target is significantly different from current position
+                Vector2 currentPos2D = new Vector2(Position.X, Position.Z);
+                if ((targetWorldPosition.Value - currentPos2D).SqrMagnitude > StoppingDistance * StoppingDistance * 0.8f) // Be a bit lenient
+                {
+                    IsMoving = true; 
+                }
+                // else, if target is very close, IsMoving might remain false or be set false in UpdateMovement
+            }
+            // If target is cleared (!targetWorldPosition.HasValue), UpdateMovement will handle stopping and setting IsMoving = false.
+
 
             if (changed || targetWorldPosition.HasValue)
             {
@@ -73,61 +98,139 @@ namespace Core.Model
 
         protected virtual void UpdateMovement(float deltaTime, Quaternion currentFullRotationFromOcean)
         {
-            if (!IsMoving || !_movementTargetPosition.HasValue)
+            float targetSpeedThisFrame;
+
+            if (!_movementTargetPosition.HasValue)
             {
-                if (CurrentSpeed > 0)
+                targetSpeedThisFrame = 0f;
+            }
+            else
+            {
+                Vector2 currentPos2D = new Vector2(Position.X, Position.Z);
+                Vector2 targetSlotPos2D = _movementTargetPosition.Value;
+                Vector2 toTargetSlot = targetSlotPos2D - currentPos2D;
+                float distanceToSlot = toTargetSlot.Magnitude;
+
+                float effectiveDecelForStopping = DecelerationRate; 
+                if (effectiveDecelForStopping < Vector3.Epsilon) effectiveDecelForStopping = 1f;
+                float predictiveStopDist = (CurrentSpeed * CurrentSpeed) / (2f * effectiveDecelForStopping);
+                float dynamicStoppingThreshold = Math.Max(predictiveStopDist, StoppingDistance) + 0.1f;
+
+
+                if (distanceToSlot < dynamicStoppingThreshold)
                 {
-                    CurrentSpeed = Math.Max(0, CurrentSpeed - (MaxSpeed * 2f * deltaTime)); 
+                    targetSpeedThisFrame = 0f; 
                 }
-                else { CurrentSpeed = 0f; }
-                if (CurrentSpeed == 0f) IsMoving = false; 
-                return;
+                else if (distanceToSlot < SlowingDistance)
+                {
+                    float baseSpeedForSlowing = MaxSpeed; 
+                    if (!OwningEscadre.IsDead && (OwningEscadre.CurrentDestination.HasValue || OwningEscadre.TargetEscadreEntityIds.Any()))
+                    {
+                        baseSpeedForSlowing = Math.Min(MaxSpeed, OwningEscadre.CurrentFleetSpeed * 1.2f); 
+                    }
+                    float slowingFactor = Math.Clamp(distanceToSlot / Math.Max(SlowingDistance, 0.1f), 0.1f, 1.0f);
+                    targetSpeedThisFrame = baseSpeedForSlowing * slowingFactor;
+                    targetSpeedThisFrame = Math.Max(0, targetSpeedThisFrame);
+                }
+                else 
+                {
+                    float escadreRefSpeed = OwningEscadre.IsDead ? MaxSpeed : OwningEscadre.CurrentFleetSpeed;
+                    bool escadreIsActivelyMoving = !OwningEscadre.IsDead && OwningEscadre.CurrentFleetSpeed > 0.05f && // slightly lower threshold for escadre active
+                                                 (OwningEscadre.CurrentDestination.HasValue || OwningEscadre.TargetEscadreEntityIds.Any());
+                    float formationDeviation = distanceToSlot;
+
+                    if (formationDeviation > FormationThreshold && escadreIsActivelyMoving)
+                    {
+                        targetSpeedThisFrame = Math.Min(MaxSpeed * 1.2f, escadreRefSpeed * 1.5f + MaxSpeed * 0.5f);
+                    }
+                    else if (escadreIsActivelyMoving)
+                    {
+                        targetSpeedThisFrame = Math.Min(MaxSpeed, escadreRefSpeed + (formationDeviation / Math.Max(FormationThreshold,0.1f)) * MaxSpeed * 0.5f);
+                    }
+                    else // Escadre is holding or very slow
+                    {
+                        // If escadre is holding, ship should move to its designated slot and then stop.
+                        // Target speed should allow it to reach the slot.
+                        targetSpeedThisFrame = MaxSpeed * 0.75f; 
+                        // If already close to slot while escadre holding, this speed will be reduced by slowing/stopping logic.
+                    }
+                }
+                targetSpeedThisFrame = Math.Min(targetSpeedThisFrame, MaxSpeed * 1.25f); 
             }
 
-            Vector2 currentPos2D = new Vector2(Position.X, Position.Z); 
-            Vector2 targetPos2D = _movementTargetPosition.Value;
-            Vector2 toTarget = targetPos2D - currentPos2D;
-
-            float distanceToTargetSq = toTarget.SqrMagnitude;
-            
-            float dynamicStoppingDistance = CurrentSpeed * deltaTime * 0.75f; 
-            dynamicStoppingDistance = Math.Max(MaxSpeed * deltaTime * 0.25f, dynamicStoppingDistance); 
-            float stoppingDistanceSq = dynamicStoppingDistance * dynamicStoppingDistance;
-            stoppingDistanceSq = Math.Max(0.01f * 0.01f, stoppingDistanceSq); 
-
-            if (distanceToTargetSq < stoppingDistanceSq)
+            if (targetSpeedThisFrame > CurrentSpeed)
             {
-                IsMoving = false; 
-                return;
+                CurrentSpeed = MathUtils.MoveTowards(CurrentSpeed, targetSpeedThisFrame, AccelerationRate * deltaTime);
             }
-
-            if (CurrentSpeed < MaxSpeed)
+            else
             {
-                CurrentSpeed = Math.Min(MaxSpeed, CurrentSpeed + (MaxSpeed * 1.0f * deltaTime)); 
-            } else {
-                 CurrentSpeed = MaxSpeed;
+                CurrentSpeed = MathUtils.MoveTowards(CurrentSpeed, targetSpeedThisFrame, DecelerationRate * deltaTime);
             }
-            
-            Vector3 currentWorldForwardFromOcean = currentFullRotationFromOcean * Vector3.Forward;
-            Vector3 planarForwardFromOcean = new Vector3(currentWorldForwardFromOcean.X, 0, currentWorldForwardFromOcean.Z).NormalizedSafe(Vector3.Forward);
-            Quaternion currentPlanarYawComponent = Quaternion.LookRotation(planarForwardFromOcean, Vector3.Up);
 
-            Vector2 directionToTargetPlanar = toTarget.Normalized;
-            Vector3 targetForwardPlanar = new Vector3(directionToTargetPlanar.X, 0, directionToTargetPlanar.Y); 
-            
-            Quaternion desiredPureYawRotation = currentPlanarYawComponent; 
-            if (targetForwardPlanar.SqrMagnitude > Vector3.Epsilon) 
+            // Update IsMoving state
+            if (CurrentSpeed < 0.01f) 
             {
-                desiredPureYawRotation = Quaternion.LookRotation(targetForwardPlanar, Vector3.Up);
+                CurrentSpeed = 0f;
+                bool atTargetSlot = false;
+                if (_movementTargetPosition.HasValue)
+                {
+                    Vector2 currentPos2D = new Vector2(Position.X, Position.Z);
+                    if ((_movementTargetPosition.Value - currentPos2D).SqrMagnitude < (StoppingDistance + 0.2f) * (StoppingDistance + 0.2f))
+                    {
+                        atTargetSlot = true;
+                    }
+                }
+
+                if (!_movementTargetPosition.HasValue || atTargetSlot) { // No target, or at current target
+                    IsMoving = false;
+                } else { // Has a target, speed is zero, but not yet at the target
+                    IsMoving = true; 
+                }
+            } else { // Speed is significant
+                IsMoving = true; 
             }
 
-            Quaternion newPureYawComponent = Quaternion.RotateTowards(currentPlanarYawComponent, desiredPureYawRotation, TurnRate * deltaTime);
-            Quaternion yawChange = newPureYawComponent * currentPlanarYawComponent.Inverse;
-            this.Rotation = (yawChange * currentFullRotationFromOcean).Normalized; 
-            
-            Vector3 planarVelocityDelta = newPureYawComponent * Vector3.Forward * CurrentSpeed * deltaTime;
-            this.Position = new Vector3(Position.X + planarVelocityDelta.X, Position.Y, Position.Z + planarVelocityDelta.Z);
+
+            // --- Rotation and Position Update ---
+            if (IsMoving || CurrentSpeed > 0.001f) // Rotate and move if IsMoving flag is true or still has residual speed
+            {
+                Quaternion finalRotation = currentFullRotationFromOcean;
+                if (_movementTargetPosition.HasValue) 
+                {
+                    Vector2 currentPos2D = new Vector2(Position.X, Position.Z);
+                    Vector2 toTargetSlot = _movementTargetPosition.Value - currentPos2D;
+
+                    if (toTargetSlot.SqrMagnitude > 0.01f) 
+                    {
+                        Vector3 currentWorldForwardFromOcean = currentFullRotationFromOcean * Vector3.Forward;
+                        Vector3 planarForwardFromOcean = new Vector3(currentWorldForwardFromOcean.X, 0f, currentWorldForwardFromOcean.Z).NormalizedSafe(Vector3.Forward);
+                        Quaternion currentPlanarYawComponent = Quaternion.LookRotation(planarForwardFromOcean, Vector3.Up);
+
+                        Vector2 directionToTargetPlanar = toTargetSlot.Normalized;
+                        Vector3 targetForwardPlanar = new Vector3(directionToTargetPlanar.X, 0f, directionToTargetPlanar.Y);
+
+                        Quaternion desiredPureYawRotation = currentPlanarYawComponent;
+                        if (targetForwardPlanar.SqrMagnitude > Vector3.Epsilon)
+                        {
+                            desiredPureYawRotation = Quaternion.LookRotation(targetForwardPlanar, Vector3.Up);
+                        }
+                        Quaternion newPureYawComponent = Quaternion.RotateTowards(currentPlanarYawComponent, desiredPureYawRotation, TurnRate * deltaTime);
+                        Quaternion yawChange = newPureYawComponent * currentPlanarYawComponent.Inverse;
+                        finalRotation = (yawChange * currentFullRotationFromOcean).Normalized;
+                    }
+                }
+                this.Rotation = finalRotation;
+
+                if (CurrentSpeed > 0f)
+                {
+                    Vector3 finalPlanarForward = (this.Rotation * Vector3.Forward);
+                    finalPlanarForward = new Vector3(finalPlanarForward.X, 0f, finalPlanarForward.Z).NormalizedSafe(Vector3.Forward);
+                    Vector3 planarVelocityDelta = finalPlanarForward * CurrentSpeed * deltaTime;
+                    this.Position = new Vector3(Position.X + planarVelocityDelta.X, Position.Y, Position.Z + planarVelocityDelta.Z);
+                }
+            }
         }
+
 
         protected virtual void UpdateCollectablesInteraction(float deltaTime)
         {
@@ -148,7 +251,6 @@ namespace Core.Model
             CollectableFloatingEntity closestUnclaimedCollectable = null;
             float closestDistSq = CollectableDetectionRange * CollectableDetectionRange;
 
-            // Use spatial query from Level
             var nearbyCollectables = _level.GetEntitiesInRadius(
                 new Vector2(this.Position.X, this.Position.Z),
                 this.CollectableDetectionRange,
@@ -158,13 +260,9 @@ namespace Core.Model
 
             foreach (var collectable in nearbyCollectables)
             {
-                // Redundant checks if filter is perfect, but good for safety
                 if (collectable.IsDead || collectable.CollectingShip != null) continue;
-
                 float distSq = (collectable.Position - this.Position).SqrMagnitude;
-                // QueryRadius should ensure they are within CollectableDetectionRange,
-                // but this precise distSq is still useful for finding the *closest*.
-                if (distSq <= closestDistSq) // Check against current closest, not just detection range
+                if (distSq <= closestDistSq) 
                 {
                     closestDistSq = distSq;
                     closestUnclaimedCollectable = collectable;

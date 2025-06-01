@@ -10,24 +10,27 @@ namespace Core.Primitives
 
         public static float MoveTowardsAngle(float current, float target, float maxDelta)
         {
-            float deltaAngle = NormalizeAngle(target - current);
-            if (MathF.Abs(deltaAngle) <= maxDelta)
+            float delta = DeltaAngle(current, target);
+            // Ensure maxDelta is positive
+            if (maxDelta < 0) maxDelta = -maxDelta;
+
+            if (MathF.Abs(delta) <= maxDelta)
             {
                 return target;
             }
-            return NormalizeAngle(current + MathF.Sign(deltaAngle) * maxDelta);
+            return NormalizeAngle(current + MathF.Sign(delta) * maxDelta);
         }
 
         public static float NormalizeAngle(float degrees)
         {
-            degrees = degrees % 360;
-            if (degrees > 180)
+            degrees = degrees % 360f;
+            if (degrees > 180f)
             {
-                degrees -= 360;
+                degrees -= 360f;
             }
-            else if (degrees < -180)
+            else if (degrees < -180f)
             {
-                degrees += 360;
+                degrees += 360f;
             }
             return degrees;
         }
@@ -37,6 +40,9 @@ namespace Core.Primitives
         /// </summary>
         public static float MoveTowards(float current, float target, float maxDelta)
         {
+            // Ensure maxDelta is positive
+            if (maxDelta < 0) maxDelta = -maxDelta;
+
             if (MathF.Abs(target - current) <= maxDelta)
             {
                 return target;
@@ -59,6 +65,21 @@ namespace Core.Primitives
         public static float LerpUnclamped(float a, float b, float t)
         {
             return a + (b - a) * t;
+        }
+
+        /// <summary>
+        /// Calculates the shortest difference between two angles in degrees.
+        /// The result will be in the range (-180, 180].
+        /// </summary>
+        public static float DeltaAngle(float current, float target)
+        {
+            float num = NormalizeAngle(target - current);
+            // This was returning NormalizeAngle(target-current), which is already in [-180, 180]
+            // No, Unity's Mathf.DeltaAngle uses Repeat:
+            // float delta = Mathf.Repeat(target - current, 360f);
+            // if (delta > 180f) delta -= 360f;
+            // Our NormalizeAngle already does this.
+            return num;
         }
     }
 }

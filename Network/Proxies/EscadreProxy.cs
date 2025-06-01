@@ -13,31 +13,38 @@ namespace Core.Network.Proxies
 {
     internal enum EscadreEventType : byte
     {
-        ShopInfoUpdated = 200
+        ShopInfoUpdated = 200,
+        FleetSpeedChanged = 201 
     }
 
     public static class EscadreProxy
     {
         public class ServerProxy : BaseServerProxy<Escadre> 
         {
+            private float _lastSentFleetSpeed = -1f; 
+
             public ServerProxy(Escadre entity, IServerNetworkLayer networkLayer)
                 : base(entity, networkLayer)
             {
+                // Subscribe to the new CurrentFleetSpeedChanged event from the Escadre model
+                entity.CurrentFleetSpeedChanged += HandleModelFleetSpeedChanged;
             }
 
             protected override float CalculateChecksum()
             {
-                // Position is now dynamic (average of ships), so it changes frequently.
-                // Rotation is also dynamic.
-                // Nickname, Resources, and Formation structure are the primary state items for checksum
-                // beyond the base (which includes Pos/Rot).
-                int baseHash = base.CalculateChecksum().GetHashCode(); // Includes Pos, Rot
+                int baseHash = base.CalculateChecksum().GetHashCode(); 
                 int formationHash = 0;
                 foreach(var slot in _entity.CurrentFormation.Slots)
                 {
                     formationHash = HashCode.Combine(formationHash, slot.ShipEntityId, slot.RelativeOffset);
                 }
-                return HashCode.Combine(baseHash, _entity.Nickname, _entity.Resources, formationHash);
+                // CurrentFleetSpeed is now handled by an event, so not in checksum for frequent corrections.
+                return HashCode.Combine(baseHash, 
+                                        _entity.Nickname, 
+                                        _entity.Resources, 
+                                        formationHash,
+                                        _entity.FleetMaxSpeed.GetHashCode(),
+                                        _entity.FormationIntegrityFactor.GetHashCode());
             }
 
             public override void SerializeSpecificInitialState(BinaryWriter writer)
@@ -62,11 +69,15 @@ namespace Core.Network.Proxies
                     writer.Write(design.Cost);
                     writer.Write((byte)design.ShipEntityType);
                 }
+
+                writer.Write(_entity.FleetMaxSpeed);
+                writer.Write(_entity.CurrentFleetSpeed); // Send initial current speed
+                writer.Write(_entity.FormationIntegrityFactor);
+                _lastSentFleetSpeed = _entity.CurrentFleetSpeed;
             }
 
             protected override void SerializeSpecificCorrectionState(BinaryWriter writer)
             {
-                // Position and Rotation are handled by BaseServerProxy.SerializeCorrectionState
                 writer.Write(_entity.OwnerClientId); 
                 writer.Write(_entity.Nickname ?? string.Empty);
                 writer.Write(_entity.Resources);
@@ -77,6 +88,10 @@ namespace Core.Network.Proxies
                     writer.Write(slot.ShipEntityId.HasValue ? slot.ShipEntityId.Value : -1);
                     SerializationUtils.WriteVector2(writer, slot.RelativeOffset);
                 }
+                writer.Write(_entity.FleetMaxSpeed);
+                writer.Write(_entity.CurrentFleetSpeed); // Also send in correction for robustness
+                _lastSentFleetSpeed = _entity.CurrentFleetSpeed;
+                writer.Write(_entity.FormationIntegrityFactor);
             }
             
             protected override void StartReplicatingInternal()
@@ -84,8 +99,7 @@ namespace Core.Network.Proxies
                 base.StartReplicatingInternal(); 
                 _entity.OnResourcesChanged += HandleModelResourcesChanged;
                 _entity.OnFormationChanged += HandleModelFormationChanged;
-                // Assuming Nickname doesn't change or if it does, it would also trigger checksum change.
-                // If Nickname has its own event: _entity.OnNicknameChanged += HandleModelNicknameChanged;
+                // Escadre.CurrentFleetSpeedChanged subscription moved to constructor/StopReplicatingInternal
                 Logger.Log($"[EscadreProxy.Server EntityId:{EntityId}] Subscribed to Escadre model events.");
             }
 
@@ -94,9 +108,24 @@ namespace Core.Network.Proxies
                 base.StopReplicatingInternal();
                 _entity.OnResourcesChanged -= HandleModelResourcesChanged;
                 _entity.OnFormationChanged -= HandleModelFormationChanged;
-                // If Nickname has its own event: _entity.OnNicknameChanged -= HandleModelNicknameChanged;
+                _entity.CurrentFleetSpeedChanged -= HandleModelFleetSpeedChanged;
                 Logger.Log($"[EscadreProxy.Server EntityId:{EntityId}] Unsubscribed from Escadre model events.");
             }
+            
+            private void HandleModelFleetSpeedChanged(float newSpeed)
+            {
+                // Only send if changed significantly enough to warrant an event, or always send.
+                // The event from the model implies it's a notable change.
+                if (Math.Abs(newSpeed - _lastSentFleetSpeed) > 0.05f || (newSpeed == 0 && _lastSentFleetSpeed !=0) || (newSpeed == _entity.FleetMaxSpeed && _lastSentFleetSpeed != _entity.FleetMaxSpeed) )
+                {
+                    _lastSentFleetSpeed = newSpeed;
+                    SendEvent((byte)EscadreEventType.FleetSpeedChanged, writer => 
+                    {
+                        writer.Write(newSpeed);
+                    });
+                }
+            }
+
 
             private void HandleModelResourcesChanged(int newAmount)
             {
@@ -136,10 +165,17 @@ namespace Core.Network.Proxies
             public List<FormationSlot> FormationSlots { get; } = new List<FormationSlot>();
             public List<ShipDesign> AvailableShopDesigns { get; } = new List<ShipDesign>();
 
+            public float FleetMaxSpeed { get; private set; }
+            public float CurrentFleetSpeed { get; private set; }
+            public float FormationIntegrityFactor { get; private set; }
+
+
             public event Action OnNicknameChanged;
             public event Action OnResourcesChanged;
             public event Action OnFormationChanged;
             public event Action OnShopDesignsChanged;
+            public event Action OnFleetParamsChanged; 
+            public event Action<float> OnCurrentFleetSpeedChanged;
 
 
             public ClientProxy(int entityId, ClientLevel clientLevel)
@@ -147,7 +183,6 @@ namespace Core.Network.Proxies
 
             protected override void DeserializeSpecificInitialState(BinaryReader reader)
             {
-                // BaseClientProxy.Initialize handles Position, Rotation from the CreateEntity message
                 OwnerClientId = reader.ReadInt32();
                 Nickname = reader.ReadString();
                 Resources = reader.ReadInt32();
@@ -172,23 +207,29 @@ namespace Core.Network.Proxies
                     AvailableShopDesigns.Add(new ShipDesign(designId, name, cost, shipEntityType));
                 }
                 
-                Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] Initialized. Owner:{OwnerClientId}, Nick:{Nickname}, Res:{Resources}, Slots:{FormationSlots.Count}, ShopDesigns:{AvailableShopDesigns.Count}");
+                FleetMaxSpeed = reader.ReadSingle();
+                CurrentFleetSpeed = reader.ReadSingle();
+                FormationIntegrityFactor = reader.ReadSingle();
+
+                Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] Initialized. Owner:{OwnerClientId}, Nick:{Nickname}, Res:{Resources}, FleetSpd:{CurrentFleetSpeed}/{FleetMaxSpeed}");
                 InvokeAllChangedEvents(); 
             }
 
             protected override void DeserializeSpecificState(BinaryReader reader)
             {
-                // BaseClientProxy.DeserializeAndUpdateState handles Position, Rotation updates from UpdateState message
                 var oldOwner = OwnerClientId; 
                 var oldNickname = Nickname;
                 var oldResources = Resources;
+                var oldFleetMaxSpeed = FleetMaxSpeed;
+                var oldCurrentFleetSpeed = CurrentFleetSpeed; // Will be updated by event too
+                var oldFormationIntegrityFactor = FormationIntegrityFactor;
                 
                 OwnerClientId = reader.ReadInt32();
                 Nickname = reader.ReadString();
                 Resources = reader.ReadInt32();
 
                 int formationCount = reader.ReadInt32();
-                bool formationStructureChanged = formationCount != FormationSlots.Count; // Basic check
+                bool formationStructureChanged = formationCount != FormationSlots.Count; 
                 var tempNewSlots = new List<FormationSlot>();
                 for (int i = 0; i < formationCount; i++)
                 {
@@ -207,12 +248,24 @@ namespace Core.Network.Proxies
                     FormationSlots.AddRange(tempNewSlots);
                 }
 
-                Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] State Updated. Owner:{OwnerClientId}, Nick:{Nickname}, Res:{Resources}, Slots:{FormationSlots.Count}");
+                FleetMaxSpeed = reader.ReadSingle();
+                float serverCurrentFleetSpeed = reader.ReadSingle(); // From correction state
+                FormationIntegrityFactor = reader.ReadSingle();
+
+                Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] State Updated. Owner:{OwnerClientId}, Nick:{Nickname}, Res:{Resources}, FleetSpd:{serverCurrentFleetSpeed}/{FleetMaxSpeed}");
 
                 if(OwnerClientId != oldOwner) Logger.LogWarning($"[EscadreProxy.Client EntityId:{EntityId}] OwnerClientId changed from {oldOwner} to {OwnerClientId}, this is unusual.");
                 if(Nickname != oldNickname) OnNicknameChanged?.Invoke();
                 if(Resources != oldResources) OnResourcesChanged?.Invoke();
                 if(formationStructureChanged) OnFormationChanged?.Invoke(); 
+                if(Math.Abs(FleetMaxSpeed - oldFleetMaxSpeed) > float.Epsilon || Math.Abs(FormationIntegrityFactor - oldFormationIntegrityFactor) > float.Epsilon) OnFleetParamsChanged?.Invoke();
+                
+                // If correction state provides a speed different from event-driven one, update and notify
+                if(Math.Abs(CurrentFleetSpeed - serverCurrentFleetSpeed) > float.Epsilon) 
+                {
+                    CurrentFleetSpeed = serverCurrentFleetSpeed;
+                    OnCurrentFleetSpeedChanged?.Invoke(CurrentFleetSpeed);
+                }
             }
 
             protected override void HandleSpecificEvent(byte specificEventType, BinaryReader reader)
@@ -236,6 +289,15 @@ namespace Core.Network.Proxies
                             Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] Processed ShopInfoUpdated event. Count: {AvailableShopDesigns.Count}");
                             OnShopDesignsChanged?.Invoke();
                             break;
+                        case EscadreEventType.FleetSpeedChanged:
+                            var oldSpeed = CurrentFleetSpeed;
+                            CurrentFleetSpeed = reader.ReadSingle();
+                            if(Math.Abs(CurrentFleetSpeed - oldSpeed) > 0.01f) // Use a small epsilon for float comparison
+                            {
+                                OnCurrentFleetSpeedChanged?.Invoke(CurrentFleetSpeed);
+                            }
+                            Logger.Log($"[EscadreProxy.Client EntityId:{EntityId}] Event: FleetSpeedChanged to {CurrentFleetSpeed}");
+                            break;
                         default:
                             Logger.LogWarning($"[EscadreProxy.Client EntityId:{EntityId}] Unhandled EscadreEventType: {eventType}");
                             break;
@@ -258,6 +320,8 @@ namespace Core.Network.Proxies
                 OnResourcesChanged?.Invoke();
                 OnFormationChanged?.Invoke();
                 OnShopDesignsChanged?.Invoke();
+                OnFleetParamsChanged?.Invoke();
+                OnCurrentFleetSpeedChanged?.Invoke(CurrentFleetSpeed);
             }
             
             protected override void CleanupEvents()
@@ -267,18 +331,17 @@ namespace Core.Network.Proxies
                 OnResourcesChanged = null;
                 OnFormationChanged = null;
                 OnShopDesignsChanged = null;
+                OnFleetParamsChanged = null;
+                OnCurrentFleetSpeedChanged = null;
             }
 
             public override void Update(float deltaTime)
             {
-                // BaseClientProxy.Update does not exist or does nothing by default.
-                // This proxy now calculates its position based on its visible ships.
-
                 if (OwningClientLevel == null) return;
 
                 Vector3 sumPositions = Vector3.Zero;
                 int visibleShipCount = 0;
-                Quaternion averageRotationAccumulator = Quaternion.Identity; // For averaging rotation, simple approach
+                Quaternion averageRotationAccumulator = _simulatedRotation; 
                 bool firstShip = true;
 
                 foreach (var proxy in OwningClientLevel.ActiveProxies.Values)
@@ -294,8 +357,6 @@ namespace Core.Network.Proxies
                         }
                         else
                         {
-                            // Simplistic rotation averaging: Slerp towards the current ship's rotation.
-                            // A more robust method might average quaternion components or use a more sophisticated algorithm.
                             averageRotationAccumulator = Quaternion.Slerp(averageRotationAccumulator, shipProxy.Rotation, 1.0f / visibleShipCount);
                         }
                     }
@@ -307,20 +368,14 @@ namespace Core.Network.Proxies
                 if (visibleShipCount > 0)
                 {
                     newSimulatedPosition = sumPositions / visibleShipCount;
-                    newSimulatedRotation = averageRotationAccumulator.Normalized; // Ensure it's normalized
+                    newSimulatedRotation = averageRotationAccumulator.Normalized; 
                 }
                 else
                 {
-                    // If no ships are visible, keep the last known server position,
-                    // or an interpolated position if it was moving.
-                    // For simplicity, we'll just hold the last known position.
-                    // The _simulatedPosition from BaseClientProxy is already the last server update or interpolated.
                     newSimulatedPosition = _simulatedPosition; 
                     newSimulatedRotation = _simulatedRotation;
                 }
                 
-                // Update the base class's simulated position and rotation
-                // This will trigger PositionChanged/RotationChanged events if they differ.
                 SetSimulatedPositionAndRotation(newSimulatedPosition, newSimulatedRotation);
             }
         }
