@@ -16,7 +16,7 @@ namespace Core.Model
         public override float BoundingRadius2D { get; protected set; } = 2.5f; // Override for specific ship size
 
         public DefaultShip(Level level, Escadre ownerEscadre, Vector3 initialPosition)
-            : base(level, ownerEscadre, initialPosition, 75f) 
+            : base(level, ownerEscadre, initialPosition, maxHealth:75f) 
         {
             MaxSpeed = 4.0f;
             TurnRate = 75f; // Degrees per second
@@ -32,7 +32,7 @@ namespace Core.Model
             // If DecelerationRate = MaxSpeed, then d = MaxSpeed / 4.
             StoppingDistance = (MaxSpeed / 4.0f) + 0.1f; // Added small buffer
             SlowingDistance = StoppingDistance * 3.0f; // Start slowing down much earlier
-            FormationThreshold = 2.5f;        
+            FormationThreshold = 0.5f;        
 
             var floatingPoints = new List<Vector3>
             {

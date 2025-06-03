@@ -67,6 +67,24 @@ namespace Core.Primitives
                     return Zero;
             }
         }
+        
+        /// <summary>
+        /// Returns this vector with a magnitude of 1 (Read Only).
+        /// Returns Zero if the vector is too small to be normalized.
+        /// Includes a fallback if magnitude is zero.
+        /// </summary>
+        /// <param name="fallback">The vector to return if the magnitude is too small for normalization.</param>
+        /// <returns>The normalized vector or the fallback if normalization is not possible.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public Vector2 NormalizedSafe(Vector2 fallback)
+        {
+            float mag = Magnitude;
+            if (mag > Epsilon)
+                return this / mag;
+            else
+                return fallback;
+        }
+
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float Dot(Vector2 lhs, Vector2 rhs)

@@ -41,25 +41,43 @@ namespace Core.Model
 
                 if (potentialTarget is AttachedEntity<TOwner> attachedSibling && attachedSibling.Owner == this.Owner)
                 {
-                    return false;
+                    return false; // Don't shoot other parts of the same owner
                 }
                 
-                if (this.Owner is Ship ownerShip)
+                if (this.Owner is Ship ownerShip) // This sentry belongs to a Ship
                 {
+                    if (ownerShip.OwningEscadre == null || ownerShip.OwningEscadre.IsDead)
+                    {
+                        // Logger.Log($"[Sentry {Id}] Owner ship {ownerShip.Id} has invalid Escadre. Cannot validate target.");
+                        return false; // Owner's escadre is invalid, cannot determine targets
+                    }
+
+                    // Sentries only target Ships of designated enemy Escadres
                     if (potentialTarget is Ship targetShip)
                     {
-                        return targetShip.OwningEscadreClientId != ownerShip.OwningEscadreClientId;
-                    }
-                    else if (potentialTarget is Escadre targetEscadre) // Cannons can target Escadre entities (e.g. if they are targetable structures)
-                    {
-                        return targetEscadre.OwnerClientId != ownerShip.OwningEscadreClientId;
+                        if (targetShip.OwningEscadre == null || targetShip.OwningEscadre.IsDead)
+                        {
+                            // Logger.Log($"[Sentry {Id}] Target ship {targetShip.Id} has invalid Escadre. Cannot validate target.");
+                            return false; // Target ship's escadre is invalid
+                        }
+
+                        // Check if the target ship's escadre is in the owner's list of targeted escadres
+                        bool isTargeted = ownerShip.OwningEscadre.TargetEscadreEntityIds.Contains(targetShip.OwningEscadre.Id);
+                        // if (isTargeted) Logger.Log($"[Sentry {Id}] Validated Ship {targetShip.Id} (Escadre {targetShip.OwningEscadre.Id}) as target for Owner Escadre {ownerShip.OwningEscadre.Id}");
+                        // else Logger.Log($"[Sentry {Id}] Ship {targetShip.Id} (Escadre {targetShip.OwningEscadre.Id}) is NOT a designated target for Owner Escadre {ownerShip.OwningEscadre.Id}");
+                        return isTargeted;
                     }
                     else
                     {
-                        return false; // Ship cannons only target other Ships or Escadres by default
+                        // Logger.Log($"[Sentry {Id}] Potential target {potentialTarget.Id} is not a Ship. Invalid target.");
+                        return false; // Not a ship, not a valid target for this sentry type under current rules
                     }
                 }
-                return true; 
+                // If Sentry's owner is not a Ship, this predicate doesn't apply specific Escadre targeting rules.
+                // However, for DefaultCannon, TOwner is Ship, so the above block will always be relevant.
+                // For now, assume this is sufficient for Ship-mounted sentries.
+                // Logger.Log($"[Sentry {Id}] Owner is not a Ship. Predicate defaults to false.");
+                return false; // If owner is not a Ship, or if none of the above conditions met, default to false.
             };
         }
 
@@ -80,8 +98,13 @@ namespace Core.Model
             if (_currentTarget != null)
             {
                 float distanceSqToCurrentTarget = (_currentTarget.Position - this.Position).SqrMagnitude;
-                if (!IsTargetValidPredicate(_currentTarget) || distanceSqToCurrentTarget > AttackRange * AttackRange || !IsPositionInFiringArc(_currentTarget.Position))
+                bool stillValid = IsTargetValidPredicate(_currentTarget);
+                bool inRange = distanceSqToCurrentTarget <= AttackRange * AttackRange;
+                bool inArc = IsPositionInFiringArc(_currentTarget.Position);
+
+                if (!stillValid || !inRange || !inArc)
                 {
+                    // Logger.Log($"[Sentry {Id}] Lost target {_currentTarget.Id}. Valid: {stillValid}, Range: {inRange} (DistSq: {distanceSqToCurrentTarget}), Arc: {inArc}.");
                     _currentTarget = null;
                 }
             }
@@ -93,10 +116,12 @@ namespace Core.Model
 
             if (_currentTarget != null)
             {
+                // Logger.Log($"[Sentry {Id}] Aiming at target {_currentTarget.Id}.");
                 AimAtTarget(delta, _currentTarget.Position);
             }
             else
             {
+                // Logger.Log($"[Sentry {Id}] No current target. Aiming forward relative to owner.");
                 AimAtTarget(delta, this.Position + Owner.Rotation * Vector3.Forward); 
             }
         }
@@ -104,22 +129,31 @@ namespace Core.Model
         protected virtual void FindNewTarget()
         {
             Entity bestTarget = null;
-            float bestTargetScore = float.MaxValue; 
+            float bestTargetScore = float.MaxValue; // Use distance squared for score (lower is better)
 
             // Use spatial query from Level
             var potentialTargets = _level.GetEntitiesInRadius(
                 new Vector2(this.Position.X, this.Position.Z), 
                 this.AttackRange,
-                entity => IsTargetValidPredicate(entity) // Pre-filter with predicate
+                entity => {
+                     // Pre-filter for spatial query: basic checks. More detailed in IsTargetValidPredicate.
+                     if (entity == null || entity.IsDead || entity == this || entity == this.Owner) return false;
+                     if (!(entity is Ship)) return false; // Only consider ships for targeting
+                     return true;
+                }
             );
 
             foreach (Entity potentialTarget in potentialTargets)
             {
-                // IsTargetValidPredicate already checked, but double check just in case or if filter was null
-                if (!IsTargetValidPredicate(potentialTarget)) continue;
+                // IsTargetValidPredicate now includes the specific Escadre targeting logic
+                if (!IsTargetValidPredicate(potentialTarget))
+                {
+                    // Logger.Log($"[Sentry {Id}] Candidate {potentialTarget.Id} rejected by IsTargetValidPredicate.");
+                    continue;
+                }
 
                 float distanceSq = (potentialTarget.Position - this.Position).SqrMagnitude;
-                // distanceSq check is somewhat redundant if QueryRadius is accurate, but good for safety
+                // distanceSq check is somewhat redundant if QueryRadius is accurate, but good for safety and for scoring
                 if (distanceSq <= AttackRange * AttackRange) 
                 {
                     if (IsPositionInFiringArc(potentialTarget.Position))
@@ -128,14 +162,18 @@ namespace Core.Model
                         {
                             bestTargetScore = distanceSq;
                             bestTarget = potentialTarget;
+                            // Logger.Log($"[Sentry {Id}] New best potential target: {bestTarget.Id} at distSq {bestTargetScore}.");
                         }
                     }
+                    // else Logger.Log($"[Sentry {Id}] Candidate {potentialTarget.Id} is out of firing arc.");
                 }
+                // else Logger.Log($"[Sentry {Id}] Candidate {potentialTarget.Id} is out of range (DistSq: {distanceSq}).");
             }
 
             if (bestTarget != null)
             {
                 _currentTarget = bestTarget;
+                // Logger.Log($"[Sentry {Id}] Acquired new target: {_currentTarget.Id}.");
             }
         }
 
