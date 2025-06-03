@@ -7,8 +7,8 @@ using Core.Model;
 using Core.Primitives;
 using Core.Network;
 using Core.Logging;
-using Core.Client; 
-using Core.Ocean; 
+using Core.Client;
+using Core.Ocean;
 
 namespace Core.Network.Proxies
 {
@@ -23,20 +23,19 @@ namespace Core.Network.Proxies
         public Quaternion Rotation => _simulatedRotation;
 
         protected bool _isDestroyed = false;
+        public bool IsDestroyed => _isDestroyed; // Implementation of IClientProxy.IsDestroyed
 
-        public ClientLevel OwningClientLevel { get; } 
+        public ClientLevel OwningClientLevel { get; }
 
-        // Made protected so derived classes can initialize and use it.
-        // Specific proxies like ShipProxy will instantiate their specific IFloatingBehavior.
-        protected IFloatingBehavior _clientFloatingBehavior; 
+        protected IFloatingBehavior _clientFloatingBehavior;
 
         public event Action OnDestroyed;
         public event Action OnLoudDestructionSignaled;
         public event Action<Vector3> PositionChanged;
         public event Action<Quaternion> RotationChanged;
 
-        protected BaseClientProxy(int entityId, ClientLevel clientLevel) 
-        { 
+        protected BaseClientProxy(int entityId, ClientLevel clientLevel)
+        {
             EntityId = entityId;
             OwningClientLevel = clientLevel ?? throw new ArgumentNullException(nameof(clientLevel));
         }
@@ -45,7 +44,7 @@ namespace Core.Network.Proxies
         {
             _simulatedPosition = SerializationUtils.ReadVector3(reader);
             _simulatedRotation = SerializationUtils.ReadQuaternion(reader);
-            DeserializeSpecificInitialState(reader); 
+            DeserializeSpecificInitialState(reader);
 
             PositionChanged?.Invoke(_simulatedPosition);
             RotationChanged?.Invoke(_simulatedRotation);
@@ -53,13 +52,20 @@ namespace Core.Network.Proxies
 
         public void HandleNetworkMessage(MessageType messageType, BinaryReader reader)
         {
-            if (_isDestroyed && messageType != MessageType.VanishEntity) { return; }
+            if (_isDestroyed && messageType != MessageType.VanishEntity && messageType != MessageType.DestroyEntity) // Allow Vanish/Destroy even if locally marked
+            {
+                 // Logger.Log($"[ClientProxy {EntityId}] Message {messageType} ignored, proxy already marked as destroyed.");
+                return;
+            }
             try
             {
                 switch (messageType)
                 {
                     case MessageType.DestroyEntity:
                         OnLoudDestructionSignaled?.Invoke();
+                        // Note: Server will typically follow up with VanishEntity to formally remove.
+                        // Or, client can consider DestroyEntity as final if that's the protocol.
+                        // For now, loud destruction is separate from final removal.
                         break;
                     case MessageType.VanishEntity:
                         NotifyDestroyed();
@@ -78,13 +84,11 @@ namespace Core.Network.Proxies
             catch (Exception ex) { Logger.LogError($"[ClientProxy {EntityId}] Error processing message {messageType}: {ex.Message}\nStackTrace: {ex.StackTrace}"); }
         }
 
-        protected virtual void DeserializeAndUpdateState(BinaryReader reader) 
+        protected virtual void DeserializeAndUpdateState(BinaryReader reader)
         {
             var serverAuthPosition = SerializationUtils.ReadVector3(reader);
             var serverAuthRotation = SerializationUtils.ReadQuaternion(reader);
 
-            // When receiving an UpdateState, we should generally snap to the server's state.
-            // The client-side simulation (including floating) will then proceed from this corrected state.
             SetSimulatedPositionAndRotation(serverAuthPosition, serverAuthRotation);
 
             DeserializeSpecificState(reader);
@@ -103,7 +107,7 @@ namespace Core.Network.Proxies
                 HandleSpecificEvent(eventTypeByte, reader);
             }
         }
-        
+
         protected virtual void HandleBaseProxyEvent(BaseProxyEventType eventType, BinaryReader reader)
         {
             switch (eventType)
@@ -111,8 +115,7 @@ namespace Core.Network.Proxies
                 case BaseProxyEventType.Teleported:
                     Vector3 newPos = SerializationUtils.ReadVector3(reader);
                     Quaternion newRot = SerializationUtils.ReadQuaternion(reader);
-                    // For teleport, we snap directly. Floating behavior will apply from this new state in the next Update.
-                    SetSimulatedPositionAndRotation(newPos, newRot); 
+                    SetSimulatedPositionAndRotation(newPos, newRot);
                     Logger.Log($"[BaseClientProxy {EntityId}] Handled Teleported event. New Pos: {newPos}, New Rot: {newRot}");
                     break;
                 default:
@@ -125,15 +128,15 @@ namespace Core.Network.Proxies
         public virtual void Update(float deltaTime)
         {
             if (_isDestroyed) return;
-
-            // BaseClientProxy does NOT implement generic floating.
-            // Derived proxies like ShipProxy are responsible for their own floating logic
-            // because they know their specific floating points and how to combine movement + floating.
+            // Base Update logic (if any)
         }
 
         public void NotifyDestroyed() {
-            if (_isDestroyed) return; _isDestroyed = true;
-            OnDestroyed?.Invoke(); CleanupEvents();
+            if (_isDestroyed) return;
+            _isDestroyed = true;
+            OnDestroyed?.Invoke(); // This event triggers ClientEntityManager to remove it from ClientLevel
+                                   // and ClientPresentationManager to release/destroy the presentation.
+            CleanupEvents();
         }
 
         protected void SetSimulatedPosition(Vector3 newPosition)
@@ -159,17 +162,6 @@ namespace Core.Network.Proxies
             bool posChanged = _simulatedPosition != newPosition;
             bool rotChanged = _simulatedRotation != newRotation;
 
-            // Keep the suspicious transform log if it's still relevant
-            if (Math.Abs(newPosition.X) < 0.01f && 
-                Math.Abs(newPosition.Z) < 0.01f &&
-                _simulatedPosition != Vector3.Zero && 
-                Math.Abs(newPosition.Y - _simulatedPosition.X) < 0.01f && // This condition seems odd: Y vs old X
-                (_simulatedPosition.X != 0f || Math.Abs(newPosition.Y) > 0.01f) && 
-                newPosition != _simulatedPosition) 
-            {
-                Logger.LogWarning($"[BaseClientProxy {EntityId}] SetSimulatedPositionAndRotation: Detected suspicious (0, val, 0)-like transform. OldPos: {_simulatedPosition}, NewPos: {newPosition}.");
-            }
-
             _simulatedPosition = newPosition;
             _simulatedRotation = newRotation;
 
@@ -179,12 +171,7 @@ namespace Core.Network.Proxies
 
         protected virtual void CleanupEvents() {
             OnDestroyed = null; OnLoudDestructionSignaled = null; PositionChanged = null; RotationChanged = null;
-            
-            // If _clientFloatingBehavior is owned by this base class and needs disposal.
-            // However, it's better if derived classes manage their specific behavior instances.
-            // For now, if it's just a reference, nullifying is fine.
-            // If it implemented IDisposable, (e.g. (_clientFloatingBehavior as IDisposable)?.Dispose(); )
-            _clientFloatingBehavior = null; 
+            _clientFloatingBehavior = null;
         }
         protected abstract void DeserializeSpecificInitialState(BinaryReader reader);
         protected abstract void DeserializeSpecificState(BinaryReader reader);
