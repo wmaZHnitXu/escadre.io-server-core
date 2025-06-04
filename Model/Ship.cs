@@ -47,7 +47,7 @@ namespace Core.Model
             StoppingDistance = 0.5f;
             FormationThreshold = 2.0f;
             AccelerationRate = 2.0f;
-            DecelerationRate = 4.0f;
+            DecelerationRate = 8.0f;
         }
 
         public override void Update(float delta)

@@ -92,7 +92,7 @@ namespace Core.Model
 
             FleetMaxSpeed = 7.5f; // Example
             _currentFleetSpeed = 0f;
-            FormationIntegrityFactor = 1.0f;
+            FormationIntegrityFactor = 0.9f;
             FleetAcceleration = 10.0f; // Example
             MaxFormationSpreadRadius = 10f; // Example
             FormationScale = 2.0f; // Example
